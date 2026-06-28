@@ -1,0 +1,17 @@
+{
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" }
+  ],
+  "crons": [
+    {
+      "path": "/api/sync-full",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/sync-live",
+      "schedule": "0 12 * * *"
+    }
+  ]
+}

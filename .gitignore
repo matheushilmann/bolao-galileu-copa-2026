@@ -1,0 +1,42 @@
+# Dependências
+node_modules/
+frontend/node_modules/
+
+# Build
+frontend/dist/
+
+# Banco de dados local
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Scripts utilitários/testes locais
+check_bytes.py
+check_encoding.py
+corrigir_encoding.py
+inserir_resultado.py
+limpar_testes.py
+mudar_data.py
+preparar_teste.py
+prototipo_login.py
+prototipo_palpites.py
+sincronizar_api.py
+sync_jogos.py
+ver_banco.py
+
+# Backend local (não usado na Vercel)
+backend/
+database/
+

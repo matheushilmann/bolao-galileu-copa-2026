@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+body {
+  @apply bg-gray-50 text-gray-800 antialiased;
+}
+
+@keyframes goalFlash {
+  0%   { background-color: white;   box-shadow: none;                        transform: scale(1);    }
+  15%  { background-color: #dcfce7; box-shadow: 0 0 0 4px #4ade80;           transform: scale(1.18); }
+  40%  { background-color: #bbf7d0; box-shadow: 0 0 0 6px #22c55e80;         transform: scale(1.12); }
+  70%  { background-color: #dcfce7; box-shadow: 0 0 0 2px #86efac;           transform: scale(1.04); }
+  100% { background-color: white;   box-shadow: none;                        transform: scale(1);    }
+}
+
+.goal-flash {
+  animation: goalFlash 1.8s ease-out forwards;
+}

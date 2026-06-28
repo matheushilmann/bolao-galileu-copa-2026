@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <path fill="#3b82f6" d="M256,0C114.62,0,0,114.62,0,256s114.62,256,256,256,256-114.62,256-256S397.38,0,256,0Z"/>
+  <path fill="#ffffff" d="M256,24C128.14,24,24,128.14,24,256s104.14,232,232,232,232-104.14,232-232S383.86,24,256,24Z"/>
+  <!-- Center pentagon -->
+  <polygon fill="#1e3a8a" points="256 160 320 206 296 282 216 282 192 206"/>
+  <!-- Lines from center -->
+  <line x1="256" y1="160" x2="256" y2="80" stroke="#1e3a8a" stroke-width="12" stroke-linecap="round"/>
+  <line x1="320" y1="206" x2="396" y2="182" stroke="#1e3a8a" stroke-width="12" stroke-linecap="round"/>
+  <line x1="296" y1="282" x2="350" y2="350" stroke="#1e3a8a" stroke-width="12" stroke-linecap="round"/>
+  <line x1="216" y1="282" x2="162" y2="350" stroke="#1e3a8a" stroke-width="12" stroke-linecap="round"/>
+  <line x1="192" y1="206" x2="116" y2="182" stroke="#1e3a8a" stroke-width="12" stroke-linecap="round"/>
+  <!-- Outer polygons/shapes -->
+  <polygon fill="#1e3a8a" points="256 80 200 40 130 56 116 182 160 134" stroke="#1e3a8a" stroke-width="8" stroke-linejoin="round"/>
+  <polygon fill="#1e3a8a" points="256 80 312 40 382 56 396 182 352 134" stroke="#1e3a8a" stroke-width="8" stroke-linejoin="round"/>
+  <polygon fill="#1e3a8a" points="396 182 458 230 466 312 350 350 376 290" stroke="#1e3a8a" stroke-width="8" stroke-linejoin="round"/>
+  <polygon fill="#1e3a8a" points="116 182 54 230 46 312 162 350 136 290" stroke="#1e3a8a" stroke-width="8" stroke-linejoin="round"/>
+  <polygon fill="#1e3a8a" points="350 350 310 440 256 472 202 440 162 350 256 390" stroke="#1e3a8a" stroke-width="8" stroke-linejoin="round"/>
+</svg>

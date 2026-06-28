@@ -1,0 +1,853 @@
+# -*- coding: utf-8 -*-
+"""
+Backend do Bolão Galileu Copa 2026
+Suporta SQLite (dev local) e PostgreSQL (Vercel)
+Detecta automaticamente pelo env var POSTGRES_URL.
+"""
+
+import os
+import requests
+from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# ======================================================================
+# CONFIGURAÇÃO DO BANCO DE DADOS (auto-detecta SQLite ou Postgres)
+# ======================================================================
+POSTGRES_URL = os.environ.get("POSTGRES_URL", "")
+
+if POSTGRES_URL:
+    import psycopg2
+    # Vercel usa "postgres://" mas psycopg2 exige "postgresql://"
+    if POSTGRES_URL.startswith("postgres://"):
+        POSTGRES_URL = POSTGRES_URL.replace("postgres://", "postgresql://", 1)
+    DB_TYPE = "postgres"
+else:
+    import sqlite3
+    DB_TYPE = "sqlite"
+
+WORLDCUP_API_URL = "https://worldcup26.ir/get/games"
+
+# Fallback: ESPN API pública — sem chave, altamente confiável
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+
+# Aliases de nomes ESPN → nomes worldcup26.ir (antes de traduzir para PT)
+ESPN_NOME_ALIAS: dict = {
+    "Bosnia & Herzegovina": "Bosnia and Herzegovina",
+    "Bosnia-Herzegovina": "Bosnia and Herzegovina",
+    "DR Congo": "Democratic Republic of the Congo",
+    "Democratic Republic of Congo": "Democratic Republic of the Congo",
+    "USA": "United States",
+    "Czechia": "Czech Republic",
+    "Korea Republic": "South Korea",
+    "Cote d'Ivoire": "Ivory Coast",
+    "Côte d'Ivoire": "Ivory Coast",
+}
+
+
+def fetch_api_com_retry(url: str, tentativas: int = 2, timeout: int = 4) -> list:
+    """Busca jogos da API externa com retry e backoff exponencial.
+    Padrão conservador para caber no limite de 10s da Vercel Hobby:
+      2 tentativas × 4s timeout + 1s de espera = ~9s no pior caso.
+    Retorna a lista de jogos ou lança exceção após esgotar as tentativas."""
+    import time
+    ultimo_erro = None
+    for i in range(tentativas):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json().get("games", [])
+        except Exception as e:
+            ultimo_erro = e
+            if i < tentativas - 1:
+                time.sleep(1)  # 1s entre tentativas
+    raise ultimo_erro
+
+
+def q(sql: str) -> str:
+    """Converte placeholders ? para %s quando usando PostgreSQL."""
+    return sql.replace("?", "%s") if DB_TYPE == "postgres" else sql
+
+
+def get_db():
+    """Cria uma nova conexão com o banco de dados."""
+    if DB_TYPE == "postgres":
+        return psycopg2.connect(POSTGRES_URL)
+    return sqlite3.connect("bolao.db")
+
+
+def upsert_usuario(cursor, email: str, nome: str):
+    """Insere um usuário se não existir (sintaxe difere entre SQLite e Postgres)."""
+    if DB_TYPE == "postgres":
+        cursor.execute(
+            "INSERT INTO usuarios (email, nome) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (email, nome),
+        )
+    else:
+        cursor.execute(
+            "INSERT OR IGNORE INTO usuarios (email, nome) VALUES (?, ?)",
+            (email, nome),
+        )
+
+
+# ======================================================================
+# TRADUÇÃO DE TIMES (EN → PT) — Copa 2026
+# ======================================================================
+TRADUCAO_TIMES = {
+    "Mexico": "México", "South Africa": "África do Sul",
+    "South Korea": "Coreia do Sul", "Czech Republic": "Rep. Tcheca",
+    "Canada": "Canadá", "Bosnia and Herzegovina": "Bósnia",
+    "Qatar": "Catar", "Switzerland": "Suíça",
+    "United States": "EUA", "Paraguay": "Paraguai",
+    "Haiti": "Haiti", "Scotland": "Escócia",
+    "Brazil": "Brasil", "Morocco": "Marrocos",
+    "Australia": "Austrália", "Turkey": "Turquia",
+    "Germany": "Alemanha", "Curaçao": "Curaçao",
+    "Netherlands": "Holanda", "Japan": "Japão",
+    "Sweden": "Suécia", "Tunisia": "Tunísia",
+    "Belgium": "Bélgica", "Egypt": "Egito",
+    "Iran": "Irã", "New Zealand": "Nova Zelândia",
+    "Spain": "Espanha", "Cape Verde": "Cabo Verde",
+    "Saudi Arabia": "Arábia Saudita", "Uruguay": "Uruguai",
+    "France": "França", "Senegal": "Senegal",
+    "Iraq": "Iraque", "Norway": "Noruega",
+    "Argentina": "Argentina", "Algeria": "Argélia",
+    "Austria": "Áustria", "Jordan": "Jordânia",
+    "Portugal": "Portugal",
+    "Democratic Republic of the Congo": "Rep. D. Congo",
+    "Uzbekistan": "Uzbequistão", "Colombia": "Colômbia",
+    "England": "Inglaterra", "Croatia": "Croácia",
+    "Ghana": "Gana", "Panama": "Panamá",
+    "Ivory Coast": "Costa do Marfim", "Ecuador": "Equador",
+}
+
+
+def espn_para_nome_db(espn_name: str) -> str:
+    """Converte nome de time da ESPN (inglês) para o nome no banco (português)."""
+    nome_en = ESPN_NOME_ALIAS.get(espn_name, espn_name)
+    return TRADUCAO_TIMES.get(nome_en, nome_en)
+
+
+def fetch_espn_placares() -> list:
+    """Busca jogos ao vivo/encerrados hoje via ESPN (fallback gratuito e confiável).
+    Retorna lista de dicts com nomes já convertidos para português (como no banco)."""
+    resp = requests.get(ESPN_SCOREBOARD_URL, timeout=5)
+    resp.raise_for_status()
+    eventos = resp.json().get("events", [])
+
+    resultados = []
+    for evento in eventos:
+        comp = evento.get("competitions", [{}])[0]
+        status = comp.get("status", {}).get("type", {})
+        state = status.get("state", "pre")       # "pre" | "in" | "post"
+        completed = status.get("completed", False)
+
+        if state == "pre" and not completed:
+            continue  # ainda não começou
+
+        home_team = away_team = home_score = away_score = None
+        for c in comp.get("competitors", []):
+            name = c.get("team", {}).get("displayName", "")
+            score = c.get("score", "0")
+            if c.get("homeAway") == "home":
+                home_team, home_score = name, score
+            else:
+                away_team, away_score = name, score
+
+        if all(x is not None for x in [home_team, away_team, home_score, away_score]):
+            resultados.append({
+                "home_team_db": espn_para_nome_db(home_team),
+                "away_team_db": espn_para_nome_db(away_team),
+                "home_score": home_score,
+                "away_score": away_score,
+                "ao_vivo": state == "in",
+            })
+
+    return resultados
+
+# Offsets UTC dos estádios (para converter horário local → UTC)
+STADIUMS_UTC_OFFSET = {
+    "1": 6, "2": 6, "3": 6,          # México (UTC-6)
+    "4": 5, "5": 5, "6": 5,          # CDT (UTC-5)
+    "7": 4, "8": 4, "9": 4,          # EDT (UTC-4)
+    "10": 4, "11": 4, "12": 4,
+    "13": 7, "14": 7, "15": 7, "16": 7,  # PDT (UTC-7)
+}
+
+
+# ======================================================================
+# MODELOS PYDANTIC
+# ======================================================================
+class NovoPalpiteModel(BaseModel):
+    email_usuario: str
+    jogo_id: str
+    gols_a: int
+    gols_b: int
+
+
+class NovoChuteInicialModel(BaseModel):
+    email_usuario: str
+    campeao: str
+    vice_campeao: str
+    placar_final_a: int
+    placar_final_b: int
+
+
+# ======================================================================
+# INICIALIZAÇÃO DO BANCO
+# ======================================================================
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    auto_id = (
+        "SERIAL PRIMARY KEY"
+        if DB_TYPE == "postgres"
+        else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    )
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS jogos (
+        jogo_id TEXT PRIMARY KEY,
+        time_a TEXT,
+        time_b TEXT,
+        fase TEXT,
+        data_hora TEXT
+    )"""
+    )
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS resultados_oficiais (
+        jogo_id TEXT PRIMARY KEY,
+        gols_a INTEGER,
+        gols_b INTEGER
+    )"""
+    )
+
+    cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS palpites (
+        id {auto_id},
+        email_usuario TEXT,
+        jogo_id TEXT,
+        gols_a INTEGER,
+        gols_b INTEGER,
+        dtahrinclusao TEXT,
+        dtahralteracao TEXT,
+        UNIQUE(email_usuario, jogo_id)
+    )"""
+    )
+
+    # Migração: adiciona colunas em bancos existentes que ainda não as têm
+    for col in ("dtahrinclusao", "dtahralteracao"):
+        try:
+            cursor.execute(f"ALTER TABLE palpites ADD COLUMN {col} TEXT")
+        except Exception:
+            pass  # coluna já existe
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS usuarios (
+        email TEXT PRIMARY KEY,
+        nome TEXT
+    )"""
+    )
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS chute_inicial (
+        email_usuario TEXT PRIMARY KEY,
+        campeao TEXT,
+        vice TEXT,
+        gols_a INTEGER,
+        gols_b INTEGER
+    )"""
+    )
+
+    conn.commit()
+    conn.close()
+
+
+try:
+    init_db()
+except Exception as e:
+    print(f"Aviso: Erro ao inicializar banco: {e}")
+
+
+# ======================================================================
+# FASTAPI APP
+# ======================================================================
+app = FastAPI(title="API Bolão Copa 2026")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ======================================================================
+# FUNÇÕES AUXILIARES DE BLOQUEIO
+# ======================================================================
+def is_fase_grupos_bloqueada(cursor) -> bool:
+    """Retorna True se o primeiro jogo da Rodada 1 já começou.
+    REGRA: bloqueia TODA a fase de grupos (Rodadas 1, 2 e 3) + Chute Inicial."""
+    cursor.execute(
+        q("SELECT MIN(data_hora) FROM jogos WHERE fase = ?"), ("Rodada 1",)
+    )
+    row = cursor.fetchone()
+    primeiro_jogo_str = row[0] if row else None
+    if not primeiro_jogo_str:
+        return False
+    try:
+        primeiro_jogo_dt = datetime.fromisoformat(
+            str(primeiro_jogo_str).replace("Z", "+00:00")
+        )
+    except Exception:
+        return False
+    return datetime.now(timezone.utc) >= primeiro_jogo_dt
+
+
+def is_rodada_bloqueada(fase: str, cursor) -> bool:
+    """Verifica se uma fase está bloqueada para palpites."""
+    # Fase de grupos: bloqueia TUDO quando Rodada 1 começa
+    if fase in ("Rodada 1", "Rodada 2", "Rodada 3"):
+        return is_fase_grupos_bloqueada(cursor)
+
+    # Mata-mata: bloqueia quando o primeiro jogo DA FASE específica começa
+    cursor.execute(q("SELECT MIN(data_hora) FROM jogos WHERE fase = ?"), (fase,))
+    row = cursor.fetchone()
+    primeiro_jogo_str = row[0] if row else None
+    if not primeiro_jogo_str:
+        return False
+    try:
+        primeiro_jogo_dt = datetime.fromisoformat(
+            str(primeiro_jogo_str).replace("Z", "+00:00")
+        )
+    except Exception:
+        return False
+    return datetime.now(timezone.utc) >= primeiro_jogo_dt
+
+
+def mapear_fase(jogo: dict) -> str:
+    """Converte type/matchday da API worldcup26.ir para a fase do bolão."""
+    tipo = jogo.get("type", "")
+    matchday = str(jogo.get("matchday", ""))
+    if tipo == "group":
+        if matchday == "1":
+            return "Rodada 1"
+        if matchday == "2":
+            return "Rodada 2"
+        if matchday == "3":
+            return "Rodada 3"
+    if tipo == "r32":
+        return "16-avos"
+    if tipo == "r16":
+        return "Oitavas"
+    if tipo == "qf":
+        return "Quartas"
+    if tipo == "sf":
+        return "Semi"
+    if tipo in ("final", "third"):
+        return "Final"
+    return tipo.upper()
+
+
+def converter_data_para_utc(local_date_str: str, stadium_id) -> str:
+    """Converte data local MM/DD/YYYY HH:MM para ISO 8601 UTC."""
+    try:
+        dt_local = datetime.strptime(local_date_str, "%m/%d/%Y %H:%M")
+        offset = STADIUMS_UTC_OFFSET.get(str(stadium_id), 5)
+        dt_utc = dt_local + timedelta(hours=offset)
+        return dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    except Exception:
+        return local_date_str
+
+
+# ======================================================================
+# ROTAS DA API
+# ======================================================================
+@app.get("/api/")
+def read_root():
+    return {"status": "API do Bolão rodando com sucesso!", "db": DB_TYPE}
+
+
+@app.get("/api/jogos")
+def listar_jogos():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT jogo_id, time_a, time_b, fase, data_hora FROM jogos ORDER BY data_hora ASC"
+    )
+    resultados = cursor.fetchall()
+    conn.close()
+
+    # Se não houver jogos cadastrados (banco novo/vazio), faz a sincronização completa inicial
+    if not resultados:
+        try:
+            sincronizar_completo()
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT jogo_id, time_a, time_b, fase, data_hora FROM jogos ORDER BY data_hora ASC"
+            )
+            resultados = cursor.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"Aviso: Sincronização automática inicial falhou: {e}")
+
+    return [
+        {
+            "jogo_id": r[0],
+            "time_a": r[1],
+            "time_b": r[2],
+            "fase": r[3],
+            "data_hora": r[4],
+        }
+        for r in resultados
+    ]
+
+
+@app.post("/api/palpites")
+def salvar_palpite_real(dados: NovoPalpiteModel):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Descobre a fase do jogo e testa bloqueio
+    cursor.execute(q("SELECT fase FROM jogos WHERE jogo_id = ?"), (dados.jogo_id,))
+    fase_resultado = cursor.fetchone()
+
+    if fase_resultado and is_rodada_bloqueada(fase_resultado[0], cursor):
+        conn.close()
+        raise HTTPException(
+            status_code=403, detail="A rodada já começou. Palpites bloqueados!"
+        )
+
+    upsert_usuario(cursor, dados.email_usuario, dados.email_usuario.split("@")[0])
+
+    agora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    cursor.execute(
+        q(
+            """INSERT INTO palpites (email_usuario, jogo_id, gols_a, gols_b, dtahrinclusao)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(email_usuario, jogo_id)
+        DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b,
+                      dtahralteracao=?"""
+        ),
+        (dados.email_usuario, dados.jogo_id, dados.gols_a, dados.gols_b, agora, agora),
+    )
+
+    conn.commit()
+    conn.close()
+    return {"status": "sucesso", "mensagem": "Palpite gravado!"}
+
+
+@app.get("/api/palpites/{email}")
+def buscar_palpites_usuario(email: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        q("SELECT jogo_id, gols_a, gols_b FROM palpites WHERE email_usuario = ?"),
+        (email,),
+    )
+    resultados = cursor.fetchall()
+    conn.close()
+    return {r[0]: {"gols_a": r[1], "gols_b": r[2]} for r in resultados}
+
+
+@app.post("/api/chute")
+def salvar_chute_real(dados: NovoChuteInicialModel):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # REGRA: Chute Inicial bloqueado quando fase de grupos começa
+    if is_fase_grupos_bloqueada(cursor):
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="A fase de grupos já começou. Chute Inicial bloqueado!",
+        )
+
+    upsert_usuario(cursor, dados.email_usuario, dados.email_usuario.split("@")[0])
+
+    cursor.execute(
+        q(
+            """INSERT INTO chute_inicial (email_usuario, campeao, vice, gols_a, gols_b)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(email_usuario)
+        DO UPDATE SET campeao=excluded.campeao, vice=excluded.vice,
+                      gols_a=excluded.gols_a, gols_b=excluded.gols_b"""
+        ),
+        (
+            dados.email_usuario,
+            dados.campeao,
+            dados.vice_campeao,
+            dados.placar_final_a,
+            dados.placar_final_b,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+    return {"status": "sucesso", "mensagem": "Chute Inicial salvo com sucesso!"}
+
+
+@app.get("/api/chute/{email}")
+def buscar_chute_usuario(email: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        q("SELECT campeao, vice, gols_a, gols_b FROM chute_inicial WHERE email_usuario = ?"),
+        (email,),
+    )
+    resultado = cursor.fetchone()
+    conn.close()
+    if resultado:
+        return {
+            "campeao": resultado[0],
+            "vice_campeao": resultado[1],
+            "placar_final_a": resultado[2],
+            "placar_final_b": resultado[3],
+        }
+    return None
+
+
+@app.get("/api/palpites-fase/{fase}")
+def buscar_palpites_fase(fase: str):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if not is_rodada_bloqueada(fase, cursor):
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Os palpites dos outros jogadores só serão revelados após o início do primeiro jogo da rodada.",
+        )
+
+    cursor.execute(
+        q(
+            """SELECT u.nome, p.jogo_id, p.gols_a, p.gols_b
+        FROM palpites p
+        JOIN usuarios u ON p.email_usuario = u.email
+        JOIN jogos j ON p.jogo_id = j.jogo_id
+        WHERE j.fase = ?"""
+        ),
+        (fase,),
+    )
+    resultados = cursor.fetchall()
+    conn.close()
+
+    palpites_galera: dict = {}
+    for nome, jogo_id, gols_a, gols_b in resultados:
+        if jogo_id not in palpites_galera:
+            palpites_galera[jogo_id] = []
+        palpites_galera[jogo_id].append(
+            {"nome": nome, "gols_a": gols_a, "gols_b": gols_b}
+        )
+    return palpites_galera
+
+
+@app.get("/api/resultados")
+def buscar_resultados_oficiais():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT jogo_id, gols_a, gols_b FROM resultados_oficiais")
+    resultados = cursor.fetchall()
+    conn.close()
+    return {r[0]: {"gols_a": r[1], "gols_b": r[2]} for r in resultados}
+
+
+@app.post("/api/sync-live")
+@app.get("/api/sync-live")
+def sincronizar_placares_ao_vivo():
+    """Busca placares ao vivo/encerrados via ESPN e atualiza resultados oficiais.
+    ESPN é a fonte primária — gratuita, confiável e atualiza em tempo real.
+    Timeout total: ~5s, dentro do limite de 10s da Vercel Hobby."""
+
+    conn = get_db()
+    cursor = conn.cursor()
+    atualizados = 0
+    ao_vivo = 0
+
+    try:
+        jogos_espn = fetch_espn_placares()
+        for jogo in jogos_espn:
+            if jogo["ao_vivo"]:
+                ao_vivo += 1
+
+            home_db = jogo["home_team_db"]
+            away_db = jogo["away_team_db"]
+            h_score = int(jogo["home_score"])
+            a_score = int(jogo["away_score"])
+
+            # Tenta ordem normal: ESPN home=time_a, ESPN away=time_b
+            cursor.execute(
+                q("SELECT jogo_id FROM jogos WHERE time_a = ? AND time_b = ? LIMIT 1"),
+                (home_db, away_db),
+            )
+            row = cursor.fetchone()
+            gols_a, gols_b = h_score, a_score  # ordem normal
+
+            if not row:
+                # ESPN pode inverter home/away — tenta ordem oposta
+                cursor.execute(
+                    q("SELECT jogo_id FROM jogos WHERE time_a = ? AND time_b = ? LIMIT 1"),
+                    (away_db, home_db),
+                )
+                row = cursor.fetchone()
+                if row:
+                    # Encontrou invertido: time_a no banco = away da ESPN
+                    # gols_a deve ser o score do time_a do banco (= away da ESPN)
+                    gols_a, gols_b = a_score, h_score
+
+            if row:
+                try:
+                    cursor.execute(
+                        q("""INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(jogo_id) DO UPDATE SET
+                        gols_a=excluded.gols_a, gols_b=excluded.gols_b"""),
+                        (row[0], gols_a, gols_b),
+                    )
+                    atualizados += 1
+                except (ValueError, TypeError):
+                    pass
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(
+            status_code=503,
+            detail=f"ESPN API falhou: {str(e)}",
+        )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "status": "sucesso",
+        "fonte": "ESPN",
+        "jogos_atualizados": atualizados,
+        "jogos_ao_vivo": ao_vivo,
+        "mensagem": f"{atualizados} placar(es) sincronizado(s) via ESPN",
+    }
+
+
+@app.get("/api/jogos-ao-vivo")
+def verificar_jogos_ao_vivo():
+    try:
+        jogos_api = fetch_api_com_retry(WORLDCUP_API_URL)
+        ao_vivo = [
+            j
+            for j in jogos_api
+            if str(j.get("finished", "FALSE")).upper() != "TRUE"
+            and j.get("time_elapsed", "notstarted") not in ("notstarted", "NS", "")
+        ]
+        return {"ao_vivo": len(ao_vivo) > 0, "quantidade": len(ao_vivo)}
+    except Exception:
+        return {"ao_vivo": False, "quantidade": 0}
+
+
+@app.get("/api/status-bloqueio")
+def verificar_status_bloqueio():
+    """Endpoint para o frontend verificar o status de bloqueio."""
+    conn = get_db()
+    cursor = conn.cursor()
+    grupos_bloqueada = is_fase_grupos_bloqueada(cursor)
+    conn.close()
+    return {
+        "fase_grupos_bloqueada": grupos_bloqueada,
+        "chute_inicial_bloqueado": grupos_bloqueada,
+    }
+
+
+@app.get("/api/ranking")
+def buscar_ranking():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT email, nome FROM usuarios")
+    usuarios = cursor.fetchall()
+
+    cursor.execute("SELECT jogo_id, gols_a, gols_b FROM resultados_oficiais")
+    resultados = {
+        row[0]: {"gols_a": row[1], "gols_b": row[2]} for row in cursor.fetchall()
+    }
+
+    cursor.execute("SELECT email_usuario, jogo_id, gols_a, gols_b FROM palpites")
+    palpites = cursor.fetchall()
+
+    cursor.execute(
+        "SELECT email_usuario, campeao, vice, gols_a, gols_b FROM chute_inicial"
+    )
+    chutes = cursor.fetchall()
+
+    # Verificar se a final foi disputada (dados REAIS, sem mock)
+    cursor.execute(
+        q(
+            """SELECT j.time_a, j.time_b, r.gols_a, r.gols_b
+        FROM jogos j
+        JOIN resultados_oficiais r ON j.jogo_id = r.jogo_id
+        WHERE j.fase = ?
+        LIMIT 1"""
+        ),
+        ("Final",),
+    )
+    final_row = cursor.fetchone()
+
+    conn.close()
+
+    # Prepara ranking base
+    ranking_dit: dict = {}
+    for email, nome in usuarios:
+        ranking_dit[email] = {
+            "nome": nome,
+            "email": email,
+            "pontos_jogos": 0,
+            "pontos_inicial": 0,
+            "pontos_totais": 0,
+        }
+
+    # Calcula pontos dos palpites de jogos
+    for email, jogo_id, p_gols_a, p_gols_b in palpites:
+        if jogo_id in resultados:
+            r_gols_a = resultados[jogo_id]["gols_a"]
+            r_gols_b = resultados[jogo_id]["gols_b"]
+
+            pontos = 0
+            # Placar exato → 3 pontos
+            if p_gols_a == r_gols_a and p_gols_b == r_gols_b:
+                pontos = 3
+            # Acertou vencedor/empate → 1 ponto
+            elif (
+                (p_gols_a > p_gols_b and r_gols_a > r_gols_b)
+                or (p_gols_a < p_gols_b and r_gols_a < r_gols_b)
+                or (p_gols_a == p_gols_b and r_gols_a == r_gols_b)
+            ):
+                pontos = 1
+
+            if email in ranking_dit:
+                ranking_dit[email]["pontos_jogos"] += pontos
+                ranking_dit[email]["pontos_totais"] += pontos
+
+    # Chute Inicial — Só calcula se a final foi disputada (dados REAIS)
+    if final_row:
+        time_a_final, time_b_final, gols_a_final, gols_b_final = final_row
+
+        campeao_real = None
+        vice_real = None
+        if gols_a_final > gols_b_final:
+            campeao_real = time_a_final
+            vice_real = time_b_final
+        elif gols_b_final > gols_a_final:
+            campeao_real = time_b_final
+            vice_real = time_a_final
+
+        if campeao_real and vice_real:
+            for email, c_campeao, c_vice, c_gols_a, c_gols_b in chutes:
+                if email in ranking_dit:
+                    pontos_chute = 0
+                    if c_campeao == campeao_real:
+                        pontos_chute += 7
+                    if c_vice == vice_real:
+                        pontos_chute += 3
+                    if c_gols_a == gols_a_final and c_gols_b == gols_b_final:
+                        pontos_chute += 5
+                    ranking_dit[email]["pontos_inicial"] += pontos_chute
+                    ranking_dit[email]["pontos_totais"] += pontos_chute
+
+    lista_ranking = list(ranking_dit.values())
+    lista_ranking.sort(key=lambda x: x["pontos_totais"], reverse=True)
+    return lista_ranking
+
+
+@app.post("/api/sync-full")
+@app.get("/api/sync-full")
+def sincronizar_completo():
+    """Sincroniza TODOS os jogos da API worldcup26.ir (setup inicial + atualização de times do mata-mata)."""
+    try:
+        jogos_api = fetch_api_com_retry(WORLDCUP_API_URL, tentativas=3, timeout=15)
+    except Exception as e:
+        raise HTTPException(
+            status_code=503, detail=f"Erro ao conectar na API após retries: {str(e)}"
+        )
+
+    if not jogos_api:
+        raise HTTPException(status_code=404, detail="Nenhum jogo retornado pela API.")
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Limpa jogos antigos e reinsere
+    cursor.execute("DELETE FROM jogos")
+
+    inseridos = 0
+    resultados_inseridos = 0
+
+    for jogo in jogos_api:
+        jogo_id = f"j_{jogo['id']}"
+        tipo = jogo.get("type", "")
+
+        # Traduz nomes dos times
+        if tipo == "group":
+            nome_en_a = jogo.get("home_team_name_en", "")
+            nome_en_b = jogo.get("away_team_name_en", "")
+            time_a = TRADUCAO_TIMES.get(nome_en_a, nome_en_a)
+            time_b = TRADUCAO_TIMES.get(nome_en_b, nome_en_b)
+        else:
+            # Mata-mata: tenta nome traduzido, senão usa label
+            nome_en_a = jogo.get("home_team_name_en", "")
+            nome_en_b = jogo.get("away_team_name_en", "")
+            time_a = TRADUCAO_TIMES.get(nome_en_a, "") if nome_en_a else ""
+            time_b = TRADUCAO_TIMES.get(nome_en_b, "") if nome_en_b else ""
+            if not time_a:
+                time_a = jogo.get("home_team_label", f"Time A #{jogo['id']}")
+            if not time_b:
+                time_b = jogo.get("away_team_label", f"Time B #{jogo['id']}")
+
+        fase = mapear_fase(jogo)
+        stadium_id = jogo.get("stadium_id", "1")
+        local_date = jogo.get("local_date", "")
+        data_hora = converter_data_para_utc(local_date, stadium_id)
+
+        cursor.execute(
+            q(
+                """INSERT INTO jogos (jogo_id, time_a, time_b, fase, data_hora)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(jogo_id) DO UPDATE SET
+                time_a=excluded.time_a, time_b=excluded.time_b,
+                fase=excluded.fase, data_hora=excluded.data_hora"""
+            ),
+            (jogo_id, time_a, time_b, fase, data_hora),
+        )
+        inseridos += 1
+
+        # Atualiza resultado se o jogo foi disputado
+        finished = str(jogo.get("finished", "FALSE")).upper() == "TRUE"
+        gols_a = jogo.get("home_score", None)
+        gols_b = jogo.get("away_score", None)
+
+        if finished and gols_a is not None and gols_b is not None:
+            try:
+                cursor.execute(
+                    q(
+                        """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b"""
+                    ),
+                    (jogo_id, int(gols_a), int(gols_b)),
+                )
+                resultados_inseridos += 1
+            except (ValueError, TypeError):
+                pass
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "status": "sucesso",
+        "jogos_inseridos": inseridos,
+        "resultados_inseridos": resultados_inseridos,
+        "mensagem": f"Sincronização completa! {inseridos} jogos e {resultados_inseridos} resultados.",
+    }
