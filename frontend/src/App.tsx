@@ -99,23 +99,23 @@ const FASES_MAP: Record<string, string> = {
 const FASES_ORDEM = Object.keys(FASES_MAP);
 
 export default function App() {
-  const [usuario, setUsuario] = useState<{nome: string, email: string} | null>(null);
+  const [usuario, setUsuario] = useState<{ nome: string, email: string } | null>(null);
   const [nomeLogin, setNomeLogin] = useState('');
   const [emailLogin, setEmailLogin] = useState('');
-  
+
   const [aba, setAba] = useState<'jogos' | 'chute' | 'palpites' | 'ranking'>('jogos');
   const [subAbaPalpites, setSubAbaPalpites] = useState<'meus' | 'galera'>('meus');
-  
+
   const [jogos, setJogos] = useState<Jogo[]>([]);
   const [ranking, setRanking] = useState<UsuarioRanking[]>([]);
   const [palpites, setPalpites] = useState<Record<string, { gols_a?: number, gols_b?: number }>>({});
-  const [palpitesGalera, setPalpitesGalera] = useState<Record<string, Array<{nome: string, gols_a: number, gols_b: number}>>>({});
+  const [palpitesGalera, setPalpitesGalera] = useState<Record<string, Array<{ nome: string, gols_a: number, gols_b: number }>>>({});
   const [erroGalera, setErroGalera] = useState<string>('');
   const [chuteInicial, setChuteInicial] = useState<ChuteInicial>({
     campeao: '', vice_campeao: '', placar_final_a: '', placar_final_b: ''
   });
-  const [resultadosOficiais, setResultadosOficiais] = useState<Record<string, { gols_a: number, gols_b: number }>>({});
-  
+  const [resultadosOficiais, setResultadosOficiais] = useState<Record<string, { gols_a: number, gols_b: number, gols_a_90?: number, gols_b_90?: number }>>({});
+
   // Animação de gol: rastreia quais jogos tiveram placar alterado recentemente
   const [golsRecentes, setGolsRecentes] = useState<Set<string>>(new Set());
   const prevResultados = useRef<Record<string, { gols_a: number, gols_b: number }>>({});
@@ -163,13 +163,26 @@ export default function App() {
     return Date.now() >= primeiraData;
   };
 
+  // Verifica se uma fase eliminatória está bloqueada para palpites.
+  // REGRA: bloqueia TODOS os jogos da fase quando o 1º jogo daquela fase começa.
+  const isFaseEliminatoriaBloqueada = (fase: string): boolean => {
+    const jogosDaFase = jogos.filter(j => j.fase === fase);
+    if (jogosDaFase.length === 0) return false;
+    const primeiraData = jogosDaFase.reduce((min, j) => {
+      const dt = new Date(j.data_hora).getTime();
+      return dt < min ? dt : min;
+    }, Infinity);
+    return Date.now() >= primeiraData;
+  };
+
   const isJogoEditavel = (jogo: Jogo): boolean => {
     // Jogos com times ainda indefinidos não podem ser editados
     if (!isTimeDefinido(jogo.time_a) || !isTimeDefinido(jogo.time_b)) return false;
     if (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase)) {
       return !isFaseDeGruposBloqueada();
     }
-    return getStatusJogo(jogo.data_hora) === 'nao_iniciado';
+    // Mata-mata: bloqueia TODOS os jogos da fase quando o 1º jogo dessa fase começa
+    return !isFaseEliminatoriaBloqueada(jogo.fase);
   };
 
   useEffect(() => {
@@ -183,7 +196,7 @@ export default function App() {
           fetch('/api/resultados').then(r => r.json()),
           fetch('/api/ranking').then(r => r.json())
         ]);
-        
+
         const resJogos = resJogosRaw;
 
         setJogos(resJogos);
@@ -209,13 +222,13 @@ export default function App() {
           if (gruposEncerrados) {
             for (const fase of ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final']) {
               const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
-              const temTimeDefinido = jogosDaFase.some((j: Jogo) => {
+              const todosTimesDefinidos = jogosDaFase.length > 0 && jogosDaFase.every((j: Jogo) => {
                 const nomeA = j.time_a?.toLowerCase() || '';
                 const nomeB = j.time_b?.toLowerCase() || '';
-                const indefinido = (n: string) => !n || n.includes('winner') || n.includes('runner-up') || n.includes('loser') || n.includes('3rd') || n.includes('group') || n.includes('match') || n.includes('time a') || n.includes('time b');
+                const indefinido = (n: string) => !n || n.includes('winner') || n.includes('runner-up') || n.includes('loser') || n.includes('3rd') || n.includes('group') || n.includes('match') || n.includes('time a') || n.includes('time b') || n.includes('vencedor') || n.includes('perdedor') || n.includes('º do grupo');
                 return !indefinido(nomeA) && !indefinido(nomeB);
               });
-              if (jogosDaFase.length > 0 && temTimeDefinido) {
+              if (todosTimesDefinidos) {
                 const todosEncerrados = jogosDaFase.every((j: Jogo) => getStatusJogo(j.data_hora) === 'encerrado');
                 if (!todosEncerrados) {
                   abaAtiva = fase;
@@ -406,12 +419,33 @@ export default function App() {
 
   const isAbaBloqueada = (faseNome: string) => {
     if (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(faseNome)) return false;
+
+    // Ordem das fases eliminatórias para verificar dependências
+    const fasesEliminatorias = ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final'];
+    const indiceFase = fasesEliminatorias.indexOf(faseNome);
+    if (indiceFase === -1) return true;
+
+    // Verifica se a fase de grupos terminou (pré-requisito para 16-avos)
+    if (indiceFase === 0) {
+      const jogosGrupos = jogos.filter(j => ['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(j.fase));
+      const gruposEncerrados = jogosGrupos.length > 0 && jogosGrupos.every(j => getStatusJogo(j.data_hora) === 'encerrado');
+      if (!gruposEncerrados) return true;
+    }
+
+    // Verifica se TODAS as fases anteriores já encerraram seus jogos
+    for (let i = 0; i < indiceFase; i++) {
+      const faseAnterior = fasesEliminatorias[i];
+      const jogosFaseAnterior = jogos.filter(j => j.fase === faseAnterior);
+      if (jogosFaseAnterior.length === 0) return true;
+      const todosEncerrados = jogosFaseAnterior.every(j => getStatusJogo(j.data_hora) === 'encerrado');
+      if (!todosEncerrados) return true;
+    }
+
+    // Verifica se a fase atual tem jogos e se TODOS os times estão definidos
     const jogosDaFase = jogos.filter(j => j.fase === faseNome);
     if (jogosDaFase.length === 0) return true;
-    
-    // Libera a aba se pelo menos um jogo tiver ambos os times definidos
-    const temAlgumJogoDefinido = jogosDaFase.some(j => isTimeDefinido(j.time_a) && isTimeDefinido(j.time_b));
-    return !temAlgumJogoDefinido;
+    const todosJogosDefinidos = jogosDaFase.every(j => isTimeDefinido(j.time_a) && isTimeDefinido(j.time_b));
+    return !todosJogosDefinidos;
   };
 
   const calcularPontosPalpite = (jogoId: string) => {
@@ -419,11 +453,11 @@ export default function App() {
     if (!palpite || palpite.gols_a === undefined || palpite.gols_b === undefined) return null;
     const oficial = resultadosOficiais[jogoId];
     if (!oficial) return { pontos: 0, label: 'Aguardando Oficial', classe: 'bg-gray-100 text-gray-500 border-gray-200' };
-    
+
     const v_a = palpite.gols_a > palpite.gols_b && oficial.gols_a > oficial.gols_b;
     const v_b = palpite.gols_a < palpite.gols_b && oficial.gols_a < oficial.gols_b;
     const emp = palpite.gols_a === palpite.gols_b && oficial.gols_a === oficial.gols_b;
-    
+
     if (palpite.gols_a === oficial.gols_a && palpite.gols_b === oficial.gols_b) return { pontos: 3, label: 'Placar Exato (+3)', classe: 'bg-green-100 text-green-800 border-green-300' };
     if (v_a || v_b || emp) return { pontos: 1, label: 'Resultado (+1)', classe: 'bg-amber-100 text-amber-800 border-amber-300' };
     return { pontos: 0, label: 'Errou (0)', classe: 'bg-red-100 text-red-800 border-red-300' };
@@ -437,41 +471,41 @@ export default function App() {
 
   const handlePalpiteChange = (jogoId: string, time: 'gols_a' | 'gols_b', valorRaw: string) => {
     const valor = sanitizarValorPlacar(valorRaw);
-    setPalpites(prev => ({ 
-      ...prev, 
-      [jogoId]: { 
-        ...prev[jogoId], 
-        [time]: valor === '' ? undefined : parseInt(valor, 10) 
-      } 
+    setPalpites(prev => ({
+      ...prev,
+      [jogoId]: {
+        ...prev[jogoId],
+        [time]: valor === '' ? undefined : parseInt(valor, 10)
+      }
     }));
-  };  const salvarTodosPalpites = async () => {
+  }; const salvarTodosPalpites = async () => {
     if (!usuario) return;
-    
+
     let jogosParaSalvar: Jogo[] = [];
     const isFaseDeGrupos = ['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(rodadaSelecionada);
-    
+
     if (isFaseDeGrupos) {
       jogosParaSalvar = jogos.filter(j => ['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(j.fase));
     } else {
       jogosParaSalvar = jogos.filter(j => j.fase === rodadaSelecionada);
     }
-    
+
     // Validar se existem campos editáveis vazios
     const jogosEditaveis = jogosParaSalvar.filter(jogo => isJogoEditavel(jogo));
     const temCamposVazios = jogosEditaveis.some(jogo => {
       const palpite = palpites[jogo.jogo_id];
-      return !palpite || 
-             palpite.gols_a === undefined || 
-             palpite.gols_b === undefined || 
-             isNaN(palpite.gols_a) || 
-             isNaN(palpite.gols_b);
+      return !palpite ||
+        palpite.gols_a === undefined ||
+        palpite.gols_b === undefined ||
+        isNaN(palpite.gols_a) ||
+        isNaN(palpite.gols_b);
     });
-    
+
     if (temCamposVazios) {
       exibirFeedback("Palpites Incompletos", "Por favor, preencha todos os palpites antes de salvar!", "warning");
       return;
     }
-    
+
     const promessas = jogosParaSalvar
       .filter(jogo => isJogoEditavel(jogo))
       .map(jogo => {
@@ -480,11 +514,11 @@ export default function App() {
           return fetch('/api/palpites', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              email_usuario: usuario.email, 
-              jogo_id: jogo.jogo_id, 
-              gols_a: palpite.gols_a, 
-              gols_b: palpite.gols_b 
+            body: JSON.stringify({
+              email_usuario: usuario.email,
+              jogo_id: jogo.jogo_id,
+              gols_a: palpite.gols_a,
+              gols_b: palpite.gols_b
             })
           });
         }
@@ -501,10 +535,10 @@ export default function App() {
       setSalvando(true);
       await Promise.all(promessas);
       exibirFeedback("Sucesso!", "Todos os palpites foram salvos com sucesso!", "success");
-      
+
       const resPalpites = await fetch(`/api/palpites/${usuario.email}`);
       if (resPalpites.ok) setPalpites(await resPalpites.json());
-      
+
     } catch (e) {
       exibirFeedback("Erro ao Salvar", "Erro ao salvar os palpites. Verifique a sua conexão.", "error");
     } finally {
@@ -514,24 +548,24 @@ export default function App() {
   const salvarChuteInicial = async (e: React.SyntheticEvent) => {
     e.preventDefault();
     if (!usuario) return;
-    
+
     if (isFaseDeGruposBloqueada()) {
       exibirFeedback("Chute Bloqueado", "A fase de grupos já começou. Não é possível editar o Chute Inicial.", "warning");
       return;
     }
-    
+
     if (
-      !chuteInicial.campeao || 
-      !chuteInicial.vice_campeao || 
-      chuteInicial.placar_final_a === '' || 
-      chuteInicial.placar_final_b === '' || 
-      chuteInicial.placar_final_a === undefined || 
+      !chuteInicial.campeao ||
+      !chuteInicial.vice_campeao ||
+      chuteInicial.placar_final_a === '' ||
+      chuteInicial.placar_final_b === '' ||
+      chuteInicial.placar_final_a === undefined ||
       chuteInicial.placar_final_b === undefined
     ) {
       exibirFeedback("Chute Incompleto", "Por favor, preencha todos os campos do Chute Inicial antes de salvar!", "warning");
       return;
     }
-    
+
     if (parseInt(chuteInicial.placar_final_a.toString(), 10) < parseInt(chuteInicial.placar_final_b.toString(), 10)) {
       exibirFeedback(
         "Placar Inválido",
@@ -540,7 +574,7 @@ export default function App() {
       );
       return;
     }
-    
+
     const carga = {
       email_usuario: usuario.email, campeao: chuteInicial.campeao, vice_campeao: chuteInicial.vice_campeao,
       placar_final_a: chuteInicial.placar_final_a, placar_final_b: chuteInicial.placar_final_b
@@ -567,7 +601,7 @@ export default function App() {
 
   // Aqui nós garantimos que filtramos usando a chave interna (Rodada 1)
   const jogosExibidos = jogos.filter(jogo => jogo.fase === rodadaSelecionada);
-  
+
   const jogosAgrupados = jogosExibidos.reduce((acc, jogo) => {
     const chave = rodadaSelecionada.includes('Rodada') ? (MAPA_GRUPOS[jogo.time_a] || 'Grupo Indefinido') : FASES_MAP[rodadaSelecionada];
     if (!acc[chave]) acc[chave] = [];
@@ -582,7 +616,7 @@ export default function App() {
     if (aba === 'palpites' && Object.keys(jogosAgrupados).length > 0) {
       calcularEstadoGrupos(jogosAgrupados);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aba, rodadaSelecionada, JSON.stringify(Object.keys(jogosAgrupados).sort())]);
 
   // Faz o scroll para o grupo alvo após render
@@ -631,7 +665,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-50 py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-4xl mx-auto space-y-6">
-        
+
         <header className="bg-gradient-to-r from-blue-700 to-blue-500 rounded-2xl shadow-lg p-8 text-center text-white">
           <h1 className="text-3xl font-extrabold tracking-tight">Bolão Galileu Copa do Mundo 2026</h1>
           <p className="mt-2 text-blue-100 font-medium">Mostre que você entende de futebol</p>
@@ -648,10 +682,10 @@ export default function App() {
         </nav>
 
         <main className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sm:p-8">
-          
+
           {aba === 'jogos' && (
             <div className="space-y-6">
-              
+
               <div className="flex w-full justify-between pb-4 border-b border-gray-100 gap-1 sm:gap-2">
                 {FASES_ORDEM.map(rodada => {
                   const bloqueada = isAbaBloqueada(rodada);
@@ -673,15 +707,15 @@ export default function App() {
                       <div className="bg-gray-50 border-b border-gray-200 px-4 py-2 text-center text-xs font-extrabold text-gray-600 uppercase tracking-widest">
                         {nomeBloco}
                       </div>
-                      
+
                       <div className="divide-y divide-gray-100">
                         {jogosDoBloco.map(jogo => {
                           const timesIndefinidos = !isTimeDefinido(jogo.time_a) || !isTimeDefinido(jogo.time_b);
-                          const bloqueado = timesIndefinidos || (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase) ? isFaseDeGruposBloqueada() : getStatusJogo(jogo.data_hora) !== 'nao_iniciado');
+                          const bloqueado = timesIndefinidos || (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase) ? isFaseDeGruposBloqueada() : isFaseEliminatoriaBloqueada(jogo.fase));
                           return (
                             <div key={jogo.jogo_id} className="p-5 flex flex-col hover:bg-blue-50/30 transition-colors">
                               <div className="text-center text-xs text-gray-400 font-bold mb-3">{formatarData(jogo.data_hora)}</div>
-                              
+
                               <div className="flex items-center space-x-2 sm:space-x-4 w-full justify-center">
                                 <div className="flex items-center space-x-2 sm:space-x-3 flex-1 min-w-0 justify-end">
                                   <span className="font-bold text-gray-700 text-xs sm:text-base text-right leading-tight">{jogo.time_a}</span>
@@ -734,8 +768,8 @@ export default function App() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
                         </svg>
                         <span>
-                          {['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(rodadaSelecionada) 
-                            ? 'Salvar Todos os Palpites (Fase de Grupos)' 
+                          {['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(rodadaSelecionada)
+                            ? 'Salvar Todos os Palpites (Fase de Grupos)'
                             : `Salvar Palpites (${FASES_MAP[rodadaSelecionada]})`
                           }
                         </span>
@@ -764,7 +798,7 @@ export default function App() {
                       <img src={getBandeira(chuteInicial.campeao)} className="absolute left-3 w-7 h-7 rounded-full border border-gray-200 z-10" />
                     )}
                     <input type="text" className={`w-full p-3 rounded-lg border border-gray-300 outline-none focus:ring-2 focus:ring-blue-500 bg-white ${SELECOES_DISPONIVEIS.includes(chuteInicial.campeao) ? 'pl-12' : ''}`} placeholder="Digite o nome da seleção..."
-                      value={chuteInicial.campeao} onChange={e => setChuteInicial({...chuteInicial, campeao: e.target.value})} onFocus={() => setDropdownAberto('campeao')} onBlur={() => setDropdownAberto(null)} />
+                      value={chuteInicial.campeao} onChange={e => setChuteInicial({ ...chuteInicial, campeao: e.target.value })} onFocus={() => setDropdownAberto('campeao')} onBlur={() => setDropdownAberto(null)} />
                   </div>
                   {dropdownAberto === 'campeao' && chuteInicial.campeao.length >= 1 && (
                     <ul className="absolute z-10 w-full bg-white border border-gray-200 mt-1 max-h-48 overflow-y-auto rounded-lg shadow-xl">
@@ -784,7 +818,7 @@ export default function App() {
                       <img src={getBandeira(chuteInicial.vice_campeao)} className="absolute left-3 w-7 h-7 rounded-full border border-gray-200 z-10" />
                     )}
                     <input type="text" className={`w-full p-3 rounded-lg border border-gray-300 outline-none focus:ring-2 focus:ring-blue-500 bg-white ${SELECOES_DISPONIVEIS.includes(chuteInicial.vice_campeao) ? 'pl-12' : ''}`} placeholder="Digite o nome da seleção..."
-                      value={chuteInicial.vice_campeao} onChange={e => setChuteInicial({...chuteInicial, vice_campeao: e.target.value})} onFocus={() => setDropdownAberto('vice')} onBlur={() => setDropdownAberto(null)} />
+                      value={chuteInicial.vice_campeao} onChange={e => setChuteInicial({ ...chuteInicial, vice_campeao: e.target.value })} onFocus={() => setDropdownAberto('vice')} onBlur={() => setDropdownAberto(null)} />
                   </div>
                   {dropdownAberto === 'vice' && chuteInicial.vice_campeao.length >= 1 && (
                     <ul className="absolute z-10 w-full bg-white border border-gray-200 mt-1 max-h-48 overflow-y-auto rounded-lg shadow-xl">
@@ -800,16 +834,16 @@ export default function App() {
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">Placar Exato da Final (90 min)</label>
                   <div className="flex items-center space-x-3">
-                    <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" className="w-10 sm:w-12 h-10 text-center text-sm sm:text-lg font-bold rounded-md border outline-none border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white" value={chuteInicial.placar_final_a ?? ''} 
+                    <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" className="w-10 sm:w-12 h-10 text-center text-sm sm:text-lg font-bold rounded-md border outline-none border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white" value={chuteInicial.placar_final_a ?? ''}
                       onChange={e => {
                         const clean = sanitizarValorPlacar(e.target.value);
-                        setChuteInicial({...chuteInicial, placar_final_a: clean === '' ? '' : parseInt(clean, 10)});
+                        setChuteInicial({ ...chuteInicial, placar_final_a: clean === '' ? '' : parseInt(clean, 10) });
                       }} />
                     <span className="text-gray-300 font-bold px-1">X</span>
-                    <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" className="w-10 sm:w-12 h-10 text-center text-sm sm:text-lg font-bold rounded-md border outline-none border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white" value={chuteInicial.placar_final_b ?? ''} 
+                    <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" className="w-10 sm:w-12 h-10 text-center text-sm sm:text-lg font-bold rounded-md border outline-none border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white" value={chuteInicial.placar_final_b ?? ''}
                       onChange={e => {
                         const clean = sanitizarValorPlacar(e.target.value);
-                        setChuteInicial({...chuteInicial, placar_final_b: clean === '' ? '' : parseInt(clean, 10)});
+                        setChuteInicial({ ...chuteInicial, placar_final_b: clean === '' ? '' : parseInt(clean, 10) });
                       }} />
                   </div>
                 </div>
@@ -908,10 +942,10 @@ export default function App() {
                                       </div>
                                       <div className="flex-shrink-0 w-32 flex justify-center sm:justify-end">
                                         {statusJogo === 'nao_iniciado'
-                                          ? <div className="px-3.5 py-1.5 text-xs font-bold border rounded-full bg-gray-100 text-gray-500 border-gray-200">Aguardando</div>
+                                          ? <div className="min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full bg-gray-100 text-gray-500 border-gray-200">Aguardando</div>
                                           : statusJogo === 'em_andamento'
-                                            ? <div className="px-3.5 py-1.5 text-xs font-bold border rounded-full bg-blue-100 text-blue-700 border-blue-200 animate-pulse">Ao Vivo</div>
-                                            : <div className={`px-3.5 py-1.5 text-xs font-bold border rounded-full ${statusPontos?.classe}`}>{statusPontos?.label}</div>
+                                            ? <div className="min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full bg-blue-100 text-blue-700 border-blue-200 animate-pulse">Ao Vivo</div>
+                                            : <div className={`min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full ${statusPontos?.classe}`}>{statusPontos?.label}</div>
                                         }
                                       </div>
                                     </div>
@@ -993,9 +1027,14 @@ export default function App() {
                                           <span className="font-bold text-gray-700 text-xs sm:text-base text-right leading-tight">{jogo.time_a}</span>
                                           <img src={getBandeira(jogo.time_a)} className="w-6 h-6 sm:w-8 sm:h-8 rounded-full border border-gray-300 flex-shrink-0" />
                                         </div>
-                                        <div className={`flex items-center justify-center px-3 py-1 bg-white border border-gray-200 rounded-lg shadow-sm min-w-[60px] sm:min-w-[70px] h-9 sm:h-10 flex-shrink-0 font-extrabold text-sm sm:text-base text-blue-800 transition-transform${golsRecentes.has(jogo.jogo_id) ? ' goal-flash' : ''}`}>
+                                        <div className={`flex flex-col items-center justify-center px-3 py-1 bg-white border border-gray-200 rounded-lg shadow-sm min-w-[60px] sm:min-w-[70px] flex-shrink-0 font-extrabold text-sm sm:text-base text-blue-800 transition-transform${golsRecentes.has(jogo.jogo_id) ? ' goal-flash' : ''}`}>
                                           {oficial ? (
-                                            <>{oficial.gols_a} <span className="text-gray-300 font-medium mx-1">x</span> {oficial.gols_b}</>
+                                            <>
+                                              <div className="flex items-center">{oficial.gols_a} <span className="text-gray-300 font-medium mx-1">x</span> {oficial.gols_b}</div>
+                                              {oficial.gols_a_90 !== undefined && oficial.gols_b_90 !== undefined && (oficial.gols_a !== oficial.gols_a_90 || oficial.gols_b !== oficial.gols_b_90) && (
+                                                <span className="text-[9px] font-bold text-purple-500 mt-0.5">Prórr.</span>
+                                              )}
+                                            </>
                                           ) : (
                                             <span className="text-gray-400 font-bold px-1">X</span>
                                           )}
@@ -1099,7 +1138,7 @@ export default function App() {
 
         </main>
       </div>
-      
+
       {feedback && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full border border-gray-100 overflow-hidden transform transition-all duration-300 scale-100">
@@ -1125,7 +1164,7 @@ export default function App() {
                   </svg>
                 </div>
               )}
-              
+
               <h3 className="text-xl font-bold text-gray-900 mb-2">{feedback.title}</h3>
               <p className="text-gray-500 text-sm">{feedback.text}</p>
             </div>
