@@ -262,8 +262,9 @@ def init_db():
     for col in ("gols_a_90", "gols_b_90"):
         try:
             cursor.execute(f"ALTER TABLE resultados_oficiais ADD COLUMN {col} INTEGER")
+            conn.commit()
         except Exception:
-            pass  # coluna já existe
+            conn.rollback()  # Postgres invalida a transação após erro; precisa de rollback
 
     cursor.execute(
         f"""CREATE TABLE IF NOT EXISTS palpites (
@@ -617,17 +618,25 @@ def buscar_palpites_fase(fase: str):
 def buscar_resultados_oficiais():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT jogo_id, gols_a, gols_b, gols_a_90, gols_b_90 FROM resultados_oficiais")
-    resultados = cursor.fetchall()
-    conn.close()
-    resultado_dict = {}
-    for r in resultados:
-        entry = {"gols_a": r[1], "gols_b": r[2]}
-        if r[3] is not None and r[4] is not None:
-            entry["gols_a_90"] = r[3]
-            entry["gols_b_90"] = r[4]
-        resultado_dict[r[0]] = entry
-    return resultado_dict
+    try:
+        cursor.execute("SELECT jogo_id, gols_a, gols_b, gols_a_90, gols_b_90 FROM resultados_oficiais")
+        resultados = cursor.fetchall()
+        conn.close()
+        resultado_dict = {}
+        for r in resultados:
+            entry = {"gols_a": r[1], "gols_b": r[2]}
+            if r[3] is not None and r[4] is not None:
+                entry["gols_a_90"] = r[3]
+                entry["gols_b_90"] = r[4]
+            resultado_dict[r[0]] = entry
+        return resultado_dict
+    except Exception:
+        conn.rollback()
+        # Fallback: colunas 90 min não existem ainda
+        cursor.execute("SELECT jogo_id, gols_a, gols_b FROM resultados_oficiais")
+        resultados = cursor.fetchall()
+        conn.close()
+        return {r[0]: {"gols_a": r[1], "gols_b": r[2]} for r in resultados}
 
 
 @app.post("/api/sync-live")
@@ -765,13 +774,23 @@ def buscar_ranking():
     cursor.execute("SELECT email, nome FROM usuarios")
     usuarios = cursor.fetchall()
 
-    cursor.execute("SELECT jogo_id, gols_a, gols_b, gols_a_90, gols_b_90 FROM resultados_oficiais")
-    resultados = {}
-    for row in cursor.fetchall():
-        resultados[row[0]] = {
-            "gols_a": row[1], "gols_b": row[2],
-            "gols_a_90": row[3], "gols_b_90": row[4],
-        }
+    try:
+        cursor.execute("SELECT jogo_id, gols_a, gols_b, gols_a_90, gols_b_90 FROM resultados_oficiais")
+        resultados = {}
+        for row in cursor.fetchall():
+            resultados[row[0]] = {
+                "gols_a": row[1], "gols_b": row[2],
+                "gols_a_90": row[3], "gols_b_90": row[4],
+            }
+    except Exception:
+        conn.rollback()
+        cursor.execute("SELECT jogo_id, gols_a, gols_b FROM resultados_oficiais")
+        resultados = {}
+        for row in cursor.fetchall():
+            resultados[row[0]] = {
+                "gols_a": row[1], "gols_b": row[2],
+                "gols_a_90": None, "gols_b_90": None,
+            }
 
     cursor.execute("SELECT email_usuario, jogo_id, gols_a, gols_b FROM palpites")
     palpites = cursor.fetchall()
