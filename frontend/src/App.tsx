@@ -454,11 +454,15 @@ export default function App() {
     const oficial = resultadosOficiais[jogoId];
     if (!oficial) return { pontos: 0, label: 'Aguardando Oficial', classe: 'bg-gray-100 text-gray-500 border-gray-200' };
 
-    const v_a = palpite.gols_a > palpite.gols_b && oficial.gols_a > oficial.gols_b;
-    const v_b = palpite.gols_a < palpite.gols_b && oficial.gols_a < oficial.gols_b;
-    const emp = palpite.gols_a === palpite.gols_b && oficial.gols_a === oficial.gols_b;
+    // REGRA: usa placar de 90 min regulamentares (sem prorrogação) quando disponível
+    const r_a = oficial.gols_a_90 !== undefined && oficial.gols_a_90 !== null ? oficial.gols_a_90 : oficial.gols_a;
+    const r_b = oficial.gols_b_90 !== undefined && oficial.gols_b_90 !== null ? oficial.gols_b_90 : oficial.gols_b;
 
-    if (palpite.gols_a === oficial.gols_a && palpite.gols_b === oficial.gols_b) return { pontos: 3, label: 'Placar Exato (+3)', classe: 'bg-green-100 text-green-800 border-green-300' };
+    const v_a = palpite.gols_a > palpite.gols_b && r_a > r_b;
+    const v_b = palpite.gols_a < palpite.gols_b && r_a < r_b;
+    const emp = palpite.gols_a === palpite.gols_b && r_a === r_b;
+
+    if (palpite.gols_a === r_a && palpite.gols_b === r_b) return { pontos: 3, label: 'Placar Exato (+3)', classe: 'bg-green-100 text-green-800 border-green-300' };
     if (v_a || v_b || emp) return { pontos: 1, label: 'Resultado (+1)', classe: 'bg-amber-100 text-amber-800 border-amber-300' };
     return { pontos: 0, label: 'Errou (0)', classe: 'bg-red-100 text-red-800 border-red-300' };
   };
@@ -1060,12 +1064,15 @@ export default function App() {
                                               let ptos = '-';
                                               let badgeClasse = 'bg-gray-100 text-gray-400 border-gray-200';
                                               if (oficial) {
-                                                if (p.gols_a === oficial.gols_a && p.gols_b === oficial.gols_b) {
+                                                // REGRA: usa placar de 90 min regulamentares (sem prorrogação) quando disponível
+                                                const r_a = oficial.gols_a_90 !== undefined && oficial.gols_a_90 !== null ? oficial.gols_a_90 : oficial.gols_a;
+                                                const r_b = oficial.gols_b_90 !== undefined && oficial.gols_b_90 !== null ? oficial.gols_b_90 : oficial.gols_b;
+                                                if (p.gols_a === r_a && p.gols_b === r_b) {
                                                   ptos = '+3 Pts'; badgeClasse = 'bg-green-100 text-green-800 border-green-200 shadow-sm';
                                                 } else if (
-                                                  (p.gols_a > p.gols_b && oficial.gols_a > oficial.gols_b) ||
-                                                  (p.gols_a < p.gols_b && oficial.gols_a < oficial.gols_b) ||
-                                                  (p.gols_a === p.gols_b && oficial.gols_a === oficial.gols_b)
+                                                  (p.gols_a > p.gols_b && r_a > r_b) ||
+                                                  (p.gols_a < p.gols_b && r_a < r_b) ||
+                                                  (p.gols_a === p.gols_b && r_a === r_b)
                                                 ) {
                                                   ptos = '+1 Pt'; badgeClasse = 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm';
                                                 } else {

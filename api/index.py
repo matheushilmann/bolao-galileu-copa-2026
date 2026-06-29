@@ -828,10 +828,13 @@ def buscar_ranking():
         }
 
     # Calcula pontos dos palpites de jogos
+    # REGRA: usa placar de 90 min regulamentares (sem prorrogação) quando disponível
     for email, jogo_id, p_gols_a, p_gols_b in palpites:
         if jogo_id in resultados:
-            r_gols_a = resultados[jogo_id]["gols_a"]
-            r_gols_b = resultados[jogo_id]["gols_b"]
+            res = resultados[jogo_id]
+            # Prefere placar de 90 min; se não existir, usa o placar total (fase de grupos)
+            r_gols_a = res["gols_a_90"] if res.get("gols_a_90") is not None else res["gols_a"]
+            r_gols_b = res["gols_b_90"] if res.get("gols_b_90") is not None else res["gols_b"]
 
             pontos = 0
             # Placar exato → 3 pontos
