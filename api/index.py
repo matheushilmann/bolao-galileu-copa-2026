@@ -37,6 +37,7 @@ ESPN_NOME_ALIAS: dict = {
     "Bosnia & Herzegovina": "Bosnia and Herzegovina",
     "Bosnia-Herzegovina": "Bosnia and Herzegovina",
     "DR Congo": "Democratic Republic of the Congo",
+    "Congo DR": "Democratic Republic of the Congo",
     "Democratic Republic of Congo": "Democratic Republic of the Congo",
     "USA": "United States",
     "Czechia": "Czech Republic",

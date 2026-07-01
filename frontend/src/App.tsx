@@ -149,7 +149,8 @@ export default function App() {
     const horaJogo = new Date(dataHoraStr).getTime();
     const agora = new Date().getTime();
     if (agora < horaJogo) return 'nao_iniciado';
-    if (agora >= horaJogo && agora < horaJogo + (2 * 60 * 60 * 1000)) return 'em_andamento';
+    // 110min = 90min regulamentares + 20min de margem para acréscimos/intervalo
+    if (agora >= horaJogo && agora < horaJogo + (110 * 60 * 1000)) return 'em_andamento';
     return 'encerrado';
   };
 
@@ -944,12 +945,30 @@ export default function App() {
                                           <span className="font-bold text-gray-700 text-xs sm:text-base text-left leading-tight">{jogo.time_b}</span>
                                         </div>
                                       </div>
-                                      <div className="flex-shrink-0 w-32 flex justify-center sm:justify-end">
+                                      <div className="flex-shrink-0 w-32 flex flex-col items-center sm:items-end gap-1">
                                         {statusJogo === 'nao_iniciado'
                                           ? <div className="min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full bg-gray-100 text-gray-500 border-gray-200">Aguardando</div>
                                           : statusJogo === 'em_andamento'
                                             ? <div className="min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full bg-blue-100 text-blue-700 border-blue-200 animate-pulse">Ao Vivo</div>
-                                            : <div className={`min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full ${statusPontos?.classe}`}>{statusPontos?.label}</div>
+                                            : <>
+                                                <div className={`min-w-[120px] text-center px-3.5 py-1.5 text-xs font-bold border rounded-full ${statusPontos?.classe}`}>{statusPontos?.label}</div>
+                                                {resultadosOficiais[jogo.jogo_id] && (() => {
+                                                  const of = resultadosOficiais[jogo.jogo_id];
+                                                  const temProrr = of.gols_a_90 !== undefined && of.gols_a_90 !== null
+                                                    && of.gols_b_90 !== undefined && of.gols_b_90 !== null
+                                                    && (of.gols_a !== of.gols_a_90 || of.gols_b !== of.gols_b_90);
+                                                  const p90a = of.gols_a_90 !== undefined && of.gols_a_90 !== null ? of.gols_a_90 : of.gols_a;
+                                                  const p90b = of.gols_b_90 !== undefined && of.gols_b_90 !== null ? of.gols_b_90 : of.gols_b;
+                                                  return (
+                                                    <div className="flex flex-col items-center">
+                                                      <span className="text-[10px] font-extrabold text-gray-500">{p90a} x {p90b}</span>
+                                                      {temProrr && (
+                                                        <span className="text-[8px] font-semibold text-purple-400">{of.gols_a}x{of.gols_b} prorr.</span>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })()}
+                                              </>
                                         }
                                       </div>
                                     </div>
@@ -1031,15 +1050,27 @@ export default function App() {
                                           <span className="font-bold text-gray-700 text-xs sm:text-base text-right leading-tight">{jogo.time_a}</span>
                                           <img src={getBandeira(jogo.time_a)} className="w-6 h-6 sm:w-8 sm:h-8 rounded-full border border-gray-300 flex-shrink-0" />
                                         </div>
-                                        <div className={`flex flex-col items-center justify-center px-3 py-1 bg-white border border-gray-200 rounded-lg shadow-sm min-w-[60px] sm:min-w-[70px] flex-shrink-0 font-extrabold text-sm sm:text-base text-blue-800 transition-transform${golsRecentes.has(jogo.jogo_id) ? ' goal-flash' : ''}`}>
-                                          {oficial ? (
-                                            <>
-                                              <div className="flex items-center">{oficial.gols_a} <span className="text-gray-300 font-medium mx-1">x</span> {oficial.gols_b}</div>
-                                              {oficial.gols_a_90 !== undefined && oficial.gols_b_90 !== undefined && (oficial.gols_a !== oficial.gols_a_90 || oficial.gols_b !== oficial.gols_b_90) && (
-                                                <span className="text-[9px] font-bold text-purple-500 mt-0.5">Prórr.</span>
-                                              )}
-                                            </>
-                                          ) : (
+                                        <div className={`flex flex-col items-center justify-center px-3 py-1 bg-white border border-gray-200 rounded-lg shadow-sm min-w-[60px] sm:min-w-[70px] flex-shrink-0 transition-transform${golsRecentes.has(jogo.jogo_id) ? ' goal-flash' : ''}`}>
+                                          {oficial ? (() => {
+                                            const temProrrogacao = oficial.gols_a_90 !== undefined && oficial.gols_a_90 !== null
+                                              && oficial.gols_b_90 !== undefined && oficial.gols_b_90 !== null
+                                              && (oficial.gols_a !== oficial.gols_a_90 || oficial.gols_b !== oficial.gols_b_90);
+                                            const placar90a = oficial.gols_a_90 !== undefined && oficial.gols_a_90 !== null ? oficial.gols_a_90 : oficial.gols_a;
+                                            const placar90b = oficial.gols_b_90 !== undefined && oficial.gols_b_90 !== null ? oficial.gols_b_90 : oficial.gols_b;
+                                            return (
+                                              <>
+                                                <div className="flex items-center font-extrabold text-sm sm:text-base text-blue-800">
+                                                  {placar90a} <span className="text-gray-300 font-medium mx-1">x</span> {placar90b}
+                                                </div>
+                                                {temProrrogacao && (
+                                                  <div className="flex items-center gap-1 mt-0.5">
+                                                    <span className="text-[9px] font-bold text-purple-500">{oficial.gols_a}x{oficial.gols_b}</span>
+                                                    <span className="text-[8px] font-semibold text-purple-400 leading-tight">prorr.</span>
+                                                  </div>
+                                                )}
+                                              </>
+                                            );
+                                          })() : (
                                             <span className="text-gray-400 font-bold px-1">X</span>
                                           )}
                                         </div>
