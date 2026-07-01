@@ -129,11 +129,9 @@ def espn_para_nome_db(espn_name: str) -> str:
     return TRADUCAO_TIMES.get(nome_en, nome_en)
 
 
-
-
 def fetch_espn_placares() -> list:
     """Busca jogos ao vivo/encerrados hoje via ESPN (fallback gratuito e confiável).
-    Retorna lista de dicts com nomes já convertidos para português (como no banco)."""
+    Calcula gols de 90 min (excluindo extra time) via detalhes da partida."""
     resp = requests.get(ESPN_SCOREBOARD_URL, timeout=5)
     resp.raise_for_status()
     eventos = resp.json().get("events", [])
@@ -143,46 +141,51 @@ def fetch_espn_placares() -> list:
         event_id = evento.get("id", "")
         comp = evento.get("competitions", [{}])[0]
         status = comp.get("status", {}).get("type", {})
-        state = status.get("state", "pre")       # "pre" | "in" | "post"
+        state = status.get("state", "pre")
         completed = status.get("completed", False)
 
         if state == "pre" and not completed:
-            continue  # ainda não começou
+            continue
 
         home_team = away_team = home_score = away_score = None
-        # Tenta extrair linescores diretamente do scoreboard
-        home_linescores = away_linescores = None
+        team_map = {}
+
         for c in comp.get("competitors", []):
             name = c.get("team", {}).get("displayName", "")
-            score = c.get("score", "0")
-            ls = c.get("linescores", [])
+            team_id = c.get("id")
+            score = int(c.get("score", 0))
+            team_map[team_id] = {"name": name, "score": score, "home": c.get("homeAway") == "home"}
             if c.get("homeAway") == "home":
                 home_team, home_score = name, score
-                home_linescores = ls
             else:
                 away_team, away_score = name, score
-                away_linescores = ls
 
-        if all(x is not None for x in [home_team, away_team, home_score, away_score]):
-            # Calcula placar de 90 min a partir dos linescores (períodos 1 e 2)
-            home_90 = away_90 = None
-            if home_linescores and away_linescores and len(home_linescores) >= 2:
-                try:
-                    h90 = 0
-                    for i, ls in enumerate(home_linescores):
-                        if i < 2:
-                            val = ls.get("value", ls.get("displayValue", 0))
-                            h90 += int(float(str(val)))
-                    a90 = 0
-                    for i, ls in enumerate(away_linescores):
-                        if i < 2:
-                            val = ls.get("value", ls.get("displayValue", 0))
-                            a90 += int(float(str(val)))
-                    home_90 = h90
-                    away_90 = a90
-                except (ValueError, TypeError):
-                    pass
+        # Calcula 90min: soma apenas gols (scoringPlay) com clock <= 5400s (90 min)
+        # Gols em prorrogação têm clock > 5400 e são excluídos automaticamente
+        home_90 = away_90 = 0
+        details = comp.get("details", [])
+        for detail in details:
+            if not detail.get("scoringPlay", False):
+                continue  # ignora cartões e outros eventos
+            if detail.get("shootout", False):
+                continue  # ignora pênaltis de disputa
+            clock = detail.get("clock", {}).get("value", 0)
+            if float(clock) > 5400:
+                continue  # gol em prorrogação — não conta nos 90min
+            team_id = detail.get("team", {}).get("id")
+            score_value = int(detail.get("scoreValue", 1))
+            own_goal = detail.get("ownGoal", False)
+            if team_id in team_map:
+                is_home = team_map[team_id]["home"]
+                # Gol contra: vai para o time contrário
+                if own_goal:
+                    is_home = not is_home
+                if is_home:
+                    home_90 += score_value
+                else:
+                    away_90 += score_value
 
+        if home_team is not None and away_team is not None:
             resultados.append({
                 "home_team_db": espn_para_nome_db(home_team),
                 "away_team_db": espn_para_nome_db(away_team),
@@ -196,6 +199,7 @@ def fetch_espn_placares() -> list:
             })
 
     return resultados
+
 
 # Offsets UTC dos estádios (para converter horário local → UTC)
 STADIUMS_UTC_OFFSET = {
