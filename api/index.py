@@ -535,12 +535,11 @@ def salvar_palpite_real(dados: NovoPalpiteModel):
     cursor.execute(q("SELECT fase FROM jogos WHERE jogo_id = ?"), (dados.jogo_id,))
     fase_resultado = cursor.fetchone()
 
-    # TEMPORARIAMENTE DESABILITADO — permitir palpite tardio
-    # if fase_resultado and is_rodada_bloqueada(fase_resultado[0], cursor):
-    #     conn.close()
-    #     raise HTTPException(
-    #         status_code=403, detail="A rodada já começou. Palpites bloqueados!"
-    #     )
+    if fase_resultado and is_rodada_bloqueada(fase_resultado[0], cursor):
+        conn.close()
+        raise HTTPException(
+            status_code=403, detail="A rodada já começou. Palpites bloqueados!"
+        )
 
     upsert_usuario(cursor, dados.email_usuario, dados.email_usuario.split("@")[0])
 
