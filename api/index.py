@@ -255,6 +255,38 @@ STADIUMS_UTC_OFFSET = {
 # ======================================================================
 class NovoPalpiteModel(BaseModel):
     email_usuario: str
+
+        if home_team is not None and away_team is not None:
+            resultados.append({
+                "home_team_db": espn_para_nome_db(home_team),
+                "away_team_db": espn_para_nome_db(away_team),
+                "home_score": home_score,
+                "away_score": away_score,
+                "home_score_90": home_90,
+                "away_score_90": away_90,
+                "event_id": event_id,
+                "ao_vivo": state == "in",
+                "completed": completed,
+            })
+
+    return resultados
+
+
+# Offsets UTC dos estádios (para converter horário local → UTC)
+STADIUMS_UTC_OFFSET = {
+    "1": 6, "2": 6, "3": 6,          # México (UTC-6)
+    "4": 5, "5": 5, "6": 5,          # CDT (UTC-5)
+    "7": 4, "8": 4, "9": 4,          # EDT (UTC-4)
+    "10": 4, "11": 4, "12": 4,
+    "13": 7, "14": 7, "15": 7, "16": 7,  # PDT (UTC-7)
+}
+
+
+# ======================================================================
+# MODELOS PYDANTIC
+# ======================================================================
+class NovoPalpiteModel(BaseModel):
+    email_usuario: str
     jogo_id: str
     gols_a: int
     gols_b: int
@@ -266,6 +298,13 @@ class NovoChuteInicialModel(BaseModel):
     vice_campeao: str
     placar_final_a: int
     placar_final_b: int
+
+
+class OverrideResultadoModel(BaseModel):
+    jogo_id: str
+    gols_a: int
+    gols_b: int
+    travado: bool = True
 
 
 # ======================================================================
@@ -308,6 +347,23 @@ def init_db():
             conn.commit()
         except Exception:
             conn.rollback()  # Postgres invalida a transação após erro; precisa de rollback
+
+    # Migração: adiciona coluna travado
+    try:
+        if DB_TYPE == "postgres":
+            cursor.execute("ALTER TABLE resultados_oficiais ADD COLUMN travado BOOLEAN DEFAULT FALSE")
+        else:
+            cursor.execute("ALTER TABLE resultados_oficiais ADD COLUMN travado INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+    # Migração: adiciona coluna fonte
+    try:
+        cursor.execute("ALTER TABLE resultados_oficiais ADD COLUMN fonte TEXT DEFAULT 'worldcup'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
 
     cursor.execute(
         f"""CREATE TABLE IF NOT EXISTS palpites (
@@ -732,6 +788,12 @@ def sincronizar_placares_ao_vivo():
                 fase = row[1]
                 is_matamata = fase not in ("Rodada 1", "Rodada 2", "Rodada 3")
 
+                # Verifica se o resultado está travado manualmente
+                cursor.execute(q("SELECT travado FROM resultados_oficiais WHERE jogo_id = ?"), (jogo_id,))
+                status_travado = cursor.fetchone()
+                if status_travado and (status_travado[0] == 1 or status_travado[0] is True):
+                    continue
+
                 # Placar de 90 min regulamentares (para mata-mata)
                 gols_a_90 = gols_b_90 = None
                 if is_matamata:
@@ -744,19 +806,19 @@ def sincronizar_placares_ao_vivo():
                 try:
                     if gols_a_90 is not None and gols_b_90 is not None:
                         cursor.execute(
-                            q("""INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b, gols_a_90, gols_b_90)
-                            VALUES (?, ?, ?, ?, ?)
+                            q("""INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b, gols_a_90, gols_b_90, fonte)
+                            VALUES (?, ?, ?, ?, ?, 'ESPN')
                             ON CONFLICT(jogo_id) DO UPDATE SET
                             gols_a=excluded.gols_a, gols_b=excluded.gols_b,
-                            gols_a_90=excluded.gols_a_90, gols_b_90=excluded.gols_b_90"""),
+                            gols_a_90=excluded.gols_a_90, gols_b_90=excluded.gols_b_90, fonte='ESPN'"""),
                             (jogo_id, gols_a, gols_b, gols_a_90, gols_b_90),
                         )
                     else:
                         cursor.execute(
-                            q("""INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
-                            VALUES (?, ?, ?)
+                            q("""INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b, fonte)
+                            VALUES (?, ?, ?, 'ESPN')
                             ON CONFLICT(jogo_id) DO UPDATE SET
-                            gols_a=excluded.gols_a, gols_b=excluded.gols_b"""),
+                            gols_a=excluded.gols_a, gols_b=excluded.gols_b, fonte='ESPN'"""),
                             (jogo_id, gols_a, gols_b),
                         )
                     atualizados += 1
@@ -1054,6 +1116,37 @@ def sincronizar_times_matamata():
     }
 
 
+@app.post("/api/admin/override-resultado")
+def override_resultado(dados: OverrideResultadoModel):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        travado_val = True if DB_TYPE == "postgres" else 1
+        if not dados.travado:
+            travado_val = False if DB_TYPE == "postgres" else 0
+
+        cursor.execute(
+            q(
+                """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b, travado)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b, travado=excluded.travado"""
+            ),
+            (dados.jogo_id, dados.gols_a, dados.gols_b, travado_val),
+        )
+        conn.commit()
+        return {"status": "sucesso", "mensagem": f"Resultado de {dados.jogo_id} alterado para {dados.gols_a}x{dados.gols_b} (travado={dados.travado})."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync-full")
+def api_sync_full():
+    return sincronizar_completo()
+
+
 @app.post("/api/sync-full")
 @app.get("/api/sync-full")
 def sincronizar_completo():
@@ -1113,20 +1206,32 @@ def sincronizar_completo():
             )
             inseridos += 1
 
-            # Atualiza resultado se o jogo foi disputado
+        # ======================================================================
+        # ATUALIZA RESULTADOS OFICIAIS (Apenas se não vieram da ESPN ou Travado)
+        # ======================================================================
+        for jogo in jogos_api:
+            jogo_id = str(jogo.get("id"))
             finished = str(jogo.get("finished", "FALSE")).upper() == "TRUE"
             gols_a = jogo.get("home_score", None)
             gols_b = jogo.get("away_score", None)
 
             if finished and gols_a is not None and gols_b is not None:
                 try:
+                    cursor.execute(q("SELECT travado, fonte FROM resultados_oficiais WHERE jogo_id = ?"), (f"j_{jogo_id}",))
+                    row = cursor.fetchone()
+                    if row:
+                        status_travado = row[0]
+                        fonte = row[1] if len(row) > 1 else None
+                        if (status_travado and (status_travado == 1 or status_travado is True)) or fonte == 'ESPN':
+                            continue  # Não sobrescreve resultado editado manualmente ou vindo da ESPN
+
                     cursor.execute(
                         q(
-                            """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b"""
+                            """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b, fonte)
+                        VALUES (?, ?, ?, 'worldcup')
+                        ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b, fonte='worldcup'"""
                         ),
-                        (jogo_id, int(gols_a), int(gols_b)),
+                        (f"j_{jogo_id}", int(gols_a), int(gols_b)),
                     )
                     resultados_inseridos += 1
                 except (ValueError, TypeError):
