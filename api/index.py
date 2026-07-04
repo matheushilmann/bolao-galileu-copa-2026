@@ -178,9 +178,6 @@ def fetch_espn_placares() -> list:
             own_goal = detail.get("ownGoal", False)
             if team_id in team_map:
                 is_home = team_map[team_id]["home"]
-                # Gol contra: vai para o time contrário
-                if own_goal:
-                    is_home = not is_home
                 if is_home:
                     home_90 += score_value
                 else:
@@ -410,7 +407,7 @@ def converter_data_para_utc(local_date_str: str, stadium_id) -> str:
         return local_date_str
 
 
-_PLACEHOLDERS = ('winner', 'runner-up', 'loser', '3rd', 'group', 'match', 'time a', 'time b', '#')
+_PLACEHOLDERS = ('winner', 'runner-up', 'loser', '3rd', 'group', 'match', 'time a', 'time b', '#', 'vencedor', 'perdedor', 'jogo')
 
 
 def _is_placeholder(name: str) -> bool:
