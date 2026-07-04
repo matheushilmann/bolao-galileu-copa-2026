@@ -446,9 +446,9 @@ def listar_jogos():
     resultados = cursor.fetchall()
     conn.close()
 
-    # Se não houver jogos ou se houver jogos de 16-avos com placeholders, faz a sincronização completa
+    # Se não houver jogos ou se houver jogos de mata-mata com placeholders, faz a sincronização completa
     precisa_resync = (not resultados) or any(
-        r[3] == "16-avos" and (_is_placeholder(r[1]) or _is_placeholder(r[2]))
+        r[3] not in ("Rodada 1", "Rodada 2", "Rodada 3") and (_is_placeholder(r[1]) or _is_placeholder(r[2]))
         for r in resultados
     )
     if precisa_resync:

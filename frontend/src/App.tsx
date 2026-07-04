@@ -414,7 +414,11 @@ export default function App() {
       lower.includes('group') ||
       lower.includes('match') ||
       lower.includes('time a') ||
-      lower.includes('time b')
+      lower.includes('time b') ||
+      lower.includes('vencedor') ||
+      lower.includes('perdedor') ||
+      lower.includes('jogo') ||
+      lower.includes('grupo')
     );
   };
 
