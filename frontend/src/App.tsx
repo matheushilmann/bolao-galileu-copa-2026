@@ -738,9 +738,7 @@ export default function App() {
                       <div className="divide-y divide-gray-100">
                         {jogosDoBloco.map(jogo => {
                           const timesIndefinidos = !isTimeDefinido(jogo.time_a) || !isTimeDefinido(jogo.time_b);
-                          // TEMPORARIAMENTE DESABILITADO — permitir palpite tardio
-                          // const bloqueado = timesIndefinidos || (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase) ? isFaseDeGruposBloqueada() : isFaseEliminatoriaBloqueada(jogo.fase));
-                          const bloqueado = timesIndefinidos;
+                          const bloqueado = timesIndefinidos || (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase) ? isFaseDeGruposBloqueada() : isFaseEliminatoriaBloqueada(jogo.fase));
                           return (
                             <div key={jogo.jogo_id} className="p-5 flex flex-col hover:bg-blue-50/30 transition-colors">
                               <div className="text-center text-xs text-gray-400 font-bold mb-3">{formatarData(jogo.data_hora)}</div>
