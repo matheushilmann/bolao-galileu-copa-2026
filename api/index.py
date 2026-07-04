@@ -213,8 +213,8 @@ def fetch_espn_placares() -> list:
                 own_goal = detail.get("ownGoal", False)
                 if team_id in team_map:
                     is_home = team_map[team_id]["home"]
-                    if own_goal:
-                        is_home = not is_home
+                    # NOTA: Na ESPN, team_id no scoringPlay já indica o time beneficiado (que recebe o gol),
+                    # mesmo quando ownGoal=True. Não devemos inverter is_home.
                     if is_home:
                         home_90_detalhes += score_value
                     else:
