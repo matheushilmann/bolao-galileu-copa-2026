@@ -192,6 +192,42 @@ export default function App() {
 
     const inicializar = async () => {
       try {
+        const aplicarJogos = (resJogos: Jogo[]) => {
+          setJogos(resJogos);
+
+          if (resJogos.length > 0) {
+            let abaAtiva = 'Rodada 1';
+            // Tenta encontrar a fase de grupos ativa
+            let gruposEncerrados = true;
+            for (const fase of ['Rodada 1', 'Rodada 2', 'Rodada 3']) {
+              const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
+              if (jogosDaFase.length > 0) {
+                const todosEncerrados = jogosDaFase.every((j: Jogo) => getStatusJogo(j.data_hora) === 'encerrado');
+                if (!todosEncerrados) {
+                  abaAtiva = fase;
+                  gruposEncerrados = false;
+                  break;
+                }
+              }
+            }
+            // Se todas as rodadas de grupo terminaram, navega para a próxima fase de mata-mata disponível
+            if (gruposEncerrados) {
+              for (const fase of ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final']) {
+                const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
+                const todosTimesDefinidos = jogosDaFase.length > 0 && jogosDaFase.every((j: Jogo) => isTimeDefinido(j.time_a) && isTimeDefinido(j.time_b));
+                if (todosTimesDefinidos) {
+                  const todosEncerrados = jogosDaFase.every((j: Jogo) => getStatusJogo(j.data_hora) === 'encerrado');
+                  if (!todosEncerrados) {
+                    abaAtiva = fase;
+                    break;
+                  }
+                }
+              }
+            }
+            setRodadaSelecionada(abaAtiva);
+          }
+        };
+
         const [resJogosRaw, resResultados, resRanking] = await Promise.all([
           fetch('/api/jogos').then(r => r.json()),
           fetch('/api/resultados').then(r => r.json()),
@@ -200,45 +236,24 @@ export default function App() {
 
         const resJogos = resJogosRaw;
 
-        setJogos(resJogos);
+        aplicarJogos(resJogos);
         setResultadosOficiais(resResultados);
         setRanking(resRanking);
 
-        if (resJogos.length > 0) {
-          let abaAtiva = 'Rodada 1';
-          // Tenta encontrar a fase de grupos ativa
-          let gruposEncerrados = true;
-          for (const fase of ['Rodada 1', 'Rodada 2', 'Rodada 3']) {
-            const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
-            if (jogosDaFase.length > 0) {
-              const todosEncerrados = jogosDaFase.every((j: Jogo) => getStatusJogo(j.data_hora) === 'encerrado');
-              if (!todosEncerrados) {
-                abaAtiva = fase;
-                gruposEncerrados = false;
-                break;
-              }
-            }
-          }
-          // Se todas as rodadas de grupo terminaram, navega para a próxima fase de mata-mata disponível
-          if (gruposEncerrados) {
-            for (const fase of ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final']) {
-              const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
-              const todosTimesDefinidos = jogosDaFase.length > 0 && jogosDaFase.every((j: Jogo) => {
-                const nomeA = j.time_a?.toLowerCase() || '';
-                const nomeB = j.time_b?.toLowerCase() || '';
-                const indefinido = (n: string) => !n || n.includes('winner') || n.includes('runner-up') || n.includes('loser') || n.includes('3rd') || n.includes('group') || n.includes('match') || n.includes('time a') || n.includes('time b') || n.includes('vencedor') || n.includes('perdedor') || n.includes('º do grupo');
-                return !indefinido(nomeA) && !indefinido(nomeB);
-              });
-              if (todosTimesDefinidos) {
-                const todosEncerrados = jogosDaFase.every((j: Jogo) => getStatusJogo(j.data_hora) === 'encerrado');
-                if (!todosEncerrados) {
-                  abaAtiva = fase;
-                  break;
-                }
-              }
-            }
-          }
-          setRodadaSelecionada(abaAtiva);
+        const temMatamataIndefinido = resJogos.some((jogo: Jogo) =>
+          !['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(jogo.fase)
+          && (!isTimeDefinido(jogo.time_a) || !isTimeDefinido(jogo.time_b))
+        );
+
+        if (temMatamataIndefinido) {
+          fetch('/api/sync-teams', { method: 'POST' })
+            .then(r => r.ok ? r.json() : null)
+            .then(async dados => {
+              if (!dados || dados.times_atualizados <= 0) return;
+              const jogosAtualizados = await fetch('/api/jogos').then(r => r.json());
+              aplicarJogos(jogosAtualizados);
+            })
+            .catch(() => { /* atualização silenciosa em segundo plano */ });
         }
       } catch (e) {
         console.error("Erro ao carregar dados", e);
@@ -418,7 +433,10 @@ export default function App() {
       lower.includes('vencedor') ||
       lower.includes('perdedor') ||
       lower.includes('jogo') ||
-      lower.includes('grupo')
+      lower.includes('grupo') ||
+      lower.includes('tbd') ||
+      lower.includes('to be determined') ||
+      lower.includes('a definir')
     );
   };
 

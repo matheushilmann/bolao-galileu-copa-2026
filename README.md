@@ -95,7 +95,7 @@ Os placares são atualizados automaticamente:
 - **Jogo ao vivo**: atualização a cada **30 segundos**
 - **Sem jogos ao vivo**: atualização a cada **5 minutos**
 
-Os resultados vêm da API [worldcup26.ir](https://worldcup26.ir), que fornece dados em tempo real da Copa do Mundo 2026.
+Os placares em tempo real vêm prioritariamente da API pública da ESPN, sem chave e sem custo. A API [worldcup26.ir](https://worldcup26.ir) fica como base de calendário/bootstrap e apoio para a carga completa de jogos.
 
 ---
 

@@ -130,6 +130,32 @@ def espn_para_nome_db(espn_name: str) -> str:
     return TRADUCAO_TIMES.get(nome_en, nome_en)
 
 
+def _placar_90_por_linhas(competidor: dict):
+    total = 0
+    encontrou_linha = False
+    for linha in competidor.get("linescores", []):
+        periodo_raw = linha.get("period") or linha.get("periodNumber")
+        if periodo_raw is None:
+            continue
+
+        try:
+            periodo = int(periodo_raw)
+        except (TypeError, ValueError):
+            continue
+
+        if periodo not in (1, 2):
+            continue
+
+        valor = linha.get("value", linha.get("score", linha.get("displayValue", 0)))
+        try:
+            total += int(float(str(valor).replace(",", ".")))
+            encontrou_linha = True
+        except (TypeError, ValueError):
+            continue
+
+    return total if encontrou_linha else None
+
+
 def fetch_espn_placares() -> list:
     """Busca jogos ao vivo/encerrados hoje via ESPN (fallback gratuito e confiável).
     Calcula gols de 90 min (excluindo extra time) via detalhes da partida."""
@@ -149,6 +175,7 @@ def fetch_espn_placares() -> list:
             continue
 
         home_team = away_team = home_score = away_score = None
+        home_score_90_linhas = away_score_90_linhas = None
         team_map = {}
 
         for c in comp.get("competitors", []):
@@ -158,30 +185,44 @@ def fetch_espn_placares() -> list:
             team_map[team_id] = {"name": name, "score": score, "home": c.get("homeAway") == "home"}
             if c.get("homeAway") == "home":
                 home_team, home_score = name, score
+                home_score_90_linhas = _placar_90_por_linhas(c)
             else:
                 away_team, away_score = name, score
+                away_score_90_linhas = _placar_90_por_linhas(c)
 
-        # Calcula 90min: soma apenas gols (scoringPlay) com clock <= 5400s (90 min)
-        # Gols em prorrogação têm clock > 5400 e são excluídos automaticamente
-        home_90 = away_90 = 0
-        details = comp.get("details", [])
-        for detail in details:
-            if not detail.get("scoringPlay", False):
-                continue  # ignora cartões e outros eventos
-            if detail.get("shootout", False):
-                continue  # ignora pênaltis de disputa
-            clock = detail.get("clock", {}).get("value", 0)
-            if float(clock) > 5400:
-                continue  # gol em prorrogação — não conta nos 90min
-            team_id = detail.get("team", {}).get("id")
-            score_value = int(detail.get("scoreValue", 1))
-            own_goal = detail.get("ownGoal", False)
-            if team_id in team_map:
-                is_home = team_map[team_id]["home"]
-                if is_home:
-                    home_90 += score_value
-                else:
-                    away_90 += score_value
+        home_90 = home_score_90_linhas
+        away_90 = away_score_90_linhas
+
+        if home_90 is None or away_90 is None:
+            # Calcula 90min: soma apenas gols (scoringPlay) com clock <= 5400s (90 min).
+            # Se a ESPN não trouxer detalhes de gols, não grava 0x0 artificial.
+            home_90_detalhes = away_90_detalhes = 0
+            encontrou_gol = False
+            details = comp.get("details", [])
+            for detail in details:
+                if not detail.get("scoringPlay", False):
+                    continue  # ignora cartões e outros eventos
+                if detail.get("shootout", False):
+                    continue  # ignora pênaltis de disputa
+                encontrou_gol = True
+                clock = detail.get("clock", {}).get("value", 0)
+                if float(clock) > 5400:
+                    continue  # gol em prorrogação — não conta nos 90min
+                team_id = detail.get("team", {}).get("id")
+                score_value = int(detail.get("scoreValue", 1))
+                own_goal = detail.get("ownGoal", False)
+                if team_id in team_map:
+                    is_home = team_map[team_id]["home"]
+                    if own_goal:
+                        is_home = not is_home
+                    if is_home:
+                        home_90_detalhes += score_value
+                    else:
+                        away_90_detalhes += score_value
+
+            if encontrou_gol or (home_score == 0 and away_score == 0):
+                home_90 = home_90_detalhes
+                away_90 = away_90_detalhes
 
         if home_team is not None and away_team is not None:
             resultados.append({
@@ -407,7 +448,11 @@ def converter_data_para_utc(local_date_str: str, stadium_id) -> str:
         return local_date_str
 
 
-_PLACEHOLDERS = ('winner', 'runner-up', 'loser', '3rd', 'group', 'match', 'time a', 'time b', '#', 'vencedor', 'perdedor', 'jogo')
+_PLACEHOLDERS = (
+    'winner', 'runner-up', 'loser', '3rd', 'group', 'match', 'time a',
+    'time b', '#', 'vencedor', 'perdedor', 'jogo', 'grupo', 'tbd',
+    'to be determined', 'a definir'
+)
 
 
 def _is_placeholder(name: str) -> bool:
@@ -446,12 +491,10 @@ def listar_jogos():
     resultados = cursor.fetchall()
     conn.close()
 
-    # Se não houver jogos ou se houver jogos de mata-mata com placeholders, faz a sincronização completa
-    precisa_resync = (not resultados) or any(
-        r[3] not in ("Rodada 1", "Rodada 2", "Rodada 3") and (_is_placeholder(r[1]) or _is_placeholder(r[2]))
-        for r in resultados
-    )
-    if precisa_resync:
+    # Listagem precisa ser rápida: não bloqueia a tela tentando resolver placeholders.
+    # Se o banco estiver vazio, faz bootstrap; confrontos do mata-mata são atualizados
+    # por /api/sync-teams, cron diário ou chamada em segundo plano do frontend.
+    if not resultados:
         try:
             sincronizar_completo()
             conn = get_db()
@@ -743,16 +786,11 @@ def sincronizar_placares_ao_vivo():
 @app.get("/api/jogos-ao-vivo")
 def verificar_jogos_ao_vivo():
     try:
-        jogos_api = fetch_api_com_retry(WORLDCUP_API_URL)
-        ao_vivo = [
-            j
-            for j in jogos_api
-            if str(j.get("finished", "FALSE")).upper() != "TRUE"
-            and j.get("time_elapsed", "notstarted") not in ("notstarted", "NS", "")
-        ]
-        return {"ao_vivo": len(ao_vivo) > 0, "quantidade": len(ao_vivo)}
+        jogos_espn = fetch_espn_placares()
+        ao_vivo = [j for j in jogos_espn if j.get("ao_vivo")]
+        return {"ao_vivo": len(ao_vivo) > 0, "quantidade": len(ao_vivo), "fonte": "ESPN"}
     except Exception:
-        return {"ao_vivo": False, "quantidade": 0}
+        return {"ao_vivo": False, "quantidade": 0, "fonte": "ESPN"}
 
 
 @app.get("/api/status-bloqueio")
@@ -896,6 +934,18 @@ def buscar_ranking():
 ESPN_SCHEDULE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260628-20260719&limit=200"
 
 
+def _parse_datetime_utc(valor):
+    if not valor:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def atualizar_times_matamata_espn(cursor) -> int:
     """Atualiza nomes de times do mata-mata usando ESPN como fonte primária.
     Só atualiza jogos que ainda têm times com placeholders (indefinidos).
@@ -909,10 +959,13 @@ def atualizar_times_matamata_espn(cursor) -> int:
         print(f"Aviso: ESPN schedule fetch falhou: {e}")
         return 0
 
-    # Monta lookup por prefixo de data/hora (YYYY-MM-DDTHH:MM)
-    espn_por_data: dict = {}
+    eventos_espn: list = []
     for evento in eventos:
         date_str = evento.get("date", "")
+        dt_espn = _parse_datetime_utc(date_str)
+        if not dt_espn:
+            continue
+
         comp = evento.get("competitions", [{}])[0]
 
         home_team = away_team = None
@@ -926,52 +979,61 @@ def atualizar_times_matamata_espn(cursor) -> int:
         if not home_team or not away_team:
             continue
 
-        try:
-            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            prefix = dt.strftime("%Y-%m-%dT%H:%M")
-        except Exception:
+        home_db = espn_para_nome_db(home_team)
+        away_db = espn_para_nome_db(away_team)
+        if _is_placeholder(home_db) or _is_placeholder(away_db):
             continue
 
-        if prefix not in espn_por_data:
-            espn_por_data[prefix] = []
-        espn_por_data[prefix].append({
-            "home_db": espn_para_nome_db(home_team),
-            "away_db": espn_para_nome_db(away_team),
+        eventos_espn.append({
+            "dt": dt_espn,
+            "home_db": home_db,
+            "away_db": away_db,
             "usado": False,
         })
 
+    eventos_espn.sort(key=lambda e: e["dt"])
+
     # Busca todos os jogos de mata-mata no banco
     cursor.execute(
-        "SELECT jogo_id, time_a, time_b, data_hora FROM jogos "
-        "WHERE fase NOT IN ('Rodada 1', 'Rodada 2', 'Rodada 3')"
+        "SELECT jogo_id, time_a, time_b, fase, data_hora FROM jogos "
+        "WHERE fase NOT IN ('Rodada 1', 'Rodada 2', 'Rodada 3') "
+        "ORDER BY data_hora ASC"
     )
     jogos_db = cursor.fetchall()
 
     atualizados = 0
 
-    for jogo_id, time_a, time_b, data_hora in jogos_db:
-        # Só atualiza se pelo menos um time é placeholder
+    for jogo_id, time_a, time_b, _fase, data_hora in jogos_db:
+        # Só atualiza se pelo menos um time é placeholder.
         if not _is_placeholder(time_a) and not _is_placeholder(time_b):
             continue
 
-        if not data_hora:
+        dt_db = _parse_datetime_utc(data_hora)
+        if not dt_db:
             continue
 
-        prefix = str(data_hora)[:16]  # "2026-06-28T19:00"
-        if prefix not in espn_por_data:
-            continue
-
-        # Encontra um jogo ESPN neste horário que ainda não foi usado
-        for entry in espn_por_data[prefix]:
+        candidatos = []
+        for entry in eventos_espn:
             if entry["usado"]:
                 continue
-            cursor.execute(
-                q("UPDATE jogos SET time_a = ?, time_b = ? WHERE jogo_id = ?"),
-                (entry["home_db"], entry["away_db"], jogo_id),
-            )
-            entry["usado"] = True
-            atualizados += 1
-            break
+
+            diferenca = abs((entry["dt"] - dt_db).total_seconds())
+            mesma_data = entry["dt"].date() == dt_db.date()
+            if diferenca <= 6 * 60 * 60 or mesma_data:
+                prioridade = 0 if diferenca <= 6 * 60 * 60 else 1
+                candidatos.append((prioridade, diferenca, entry))
+
+        if not candidatos:
+            continue
+
+        candidatos.sort(key=lambda c: (c[0], c[1]))
+        entry = candidatos[0][2]
+        cursor.execute(
+            q("UPDATE jogos SET time_a = ?, time_b = ? WHERE jogo_id = ?"),
+            (entry["home_db"], entry["away_db"], jogo_id),
+        )
+        entry["usado"] = True
+        atualizados += 1
 
     return atualizados
 
@@ -996,81 +1058,88 @@ def sincronizar_times_matamata():
 @app.get("/api/sync-full")
 def sincronizar_completo():
     """Sincroniza TODOS os jogos da API worldcup26.ir (setup inicial + atualização de times do mata-mata)."""
+    erro_worldcup = None
     try:
-        jogos_api = fetch_api_com_retry(WORLDCUP_API_URL, tentativas=3, timeout=15)
+        jogos_api = fetch_api_com_retry(WORLDCUP_API_URL)
     except Exception as e:
-        raise HTTPException(
-            status_code=503, detail=f"Erro ao conectar na API após retries: {str(e)}"
-        )
-
-    if not jogos_api:
-        raise HTTPException(status_code=404, detail="Nenhum jogo retornado pela API.")
+        jogos_api = []
+        erro_worldcup = e
 
     conn = get_db()
     cursor = conn.cursor()
 
-    # Limpa jogos antigos e reinsere
-    cursor.execute("DELETE FROM jogos")
-
     inseridos = 0
     resultados_inseridos = 0
 
-    for jogo in jogos_api:
-        jogo_id = f"j_{jogo['id']}"
-        tipo = jogo.get("type", "")
+    if jogos_api:
+        # Limpa jogos antigos e reinsere
+        cursor.execute("DELETE FROM jogos")
 
-        # Traduz nomes dos times
-        if tipo == "group":
-            nome_en_a = jogo.get("home_team_name_en", "")
-            nome_en_b = jogo.get("away_team_name_en", "")
-            time_a = TRADUCAO_TIMES.get(nome_en_a, nome_en_a)
-            time_b = TRADUCAO_TIMES.get(nome_en_b, nome_en_b)
-        else:
-            # Mata-mata: tenta nome traduzido, senão nome em inglês, senão label traduzido
-            nome_en_a = jogo.get("home_team_name_en", "")
-            nome_en_b = jogo.get("away_team_name_en", "")
-            time_a = TRADUCAO_TIMES.get(nome_en_a, nome_en_a) if nome_en_a else ""
-            time_b = TRADUCAO_TIMES.get(nome_en_b, nome_en_b) if nome_en_b else ""
-            if not time_a:
-                time_a = traduzir_label(jogo.get("home_team_label", f"Time A #{jogo['id']}"))
-            if not time_b:
-                time_b = traduzir_label(jogo.get("away_team_label", f"Time B #{jogo['id']}"))
+        for jogo in jogos_api:
+            jogo_id = f"j_{jogo['id']}"
+            tipo = jogo.get("type", "")
 
-        fase = mapear_fase(jogo)
-        stadium_id = jogo.get("stadium_id", "1")
-        local_date = jogo.get("local_date", "")
-        data_hora = converter_data_para_utc(local_date, stadium_id)
+            # Traduz nomes dos times
+            if tipo == "group":
+                nome_en_a = jogo.get("home_team_name_en", "")
+                nome_en_b = jogo.get("away_team_name_en", "")
+                time_a = TRADUCAO_TIMES.get(nome_en_a, nome_en_a)
+                time_b = TRADUCAO_TIMES.get(nome_en_b, nome_en_b)
+            else:
+                # Mata-mata: tenta nome traduzido, senão nome em inglês, senão label traduzido
+                nome_en_a = jogo.get("home_team_name_en", "")
+                nome_en_b = jogo.get("away_team_name_en", "")
+                time_a = TRADUCAO_TIMES.get(nome_en_a, nome_en_a) if nome_en_a else ""
+                time_b = TRADUCAO_TIMES.get(nome_en_b, nome_en_b) if nome_en_b else ""
+                if not time_a:
+                    time_a = traduzir_label(jogo.get("home_team_label", f"Time A #{jogo['id']}"))
+                if not time_b:
+                    time_b = traduzir_label(jogo.get("away_team_label", f"Time B #{jogo['id']}"))
 
-        cursor.execute(
-            q(
-                """INSERT INTO jogos (jogo_id, time_a, time_b, fase, data_hora)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(jogo_id) DO UPDATE SET
-                time_a=excluded.time_a, time_b=excluded.time_b,
-                fase=excluded.fase, data_hora=excluded.data_hora"""
-            ),
-            (jogo_id, time_a, time_b, fase, data_hora),
-        )
-        inseridos += 1
+            fase = mapear_fase(jogo)
+            stadium_id = jogo.get("stadium_id", "1")
+            local_date = jogo.get("local_date", "")
+            data_hora = converter_data_para_utc(local_date, stadium_id)
 
-        # Atualiza resultado se o jogo foi disputado
-        finished = str(jogo.get("finished", "FALSE")).upper() == "TRUE"
-        gols_a = jogo.get("home_score", None)
-        gols_b = jogo.get("away_score", None)
+            cursor.execute(
+                q(
+                    """INSERT INTO jogos (jogo_id, time_a, time_b, fase, data_hora)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(jogo_id) DO UPDATE SET
+                    time_a=excluded.time_a, time_b=excluded.time_b,
+                    fase=excluded.fase, data_hora=excluded.data_hora"""
+                ),
+                (jogo_id, time_a, time_b, fase, data_hora),
+            )
+            inseridos += 1
 
-        if finished and gols_a is not None and gols_b is not None:
-            try:
-                cursor.execute(
-                    q(
-                        """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b"""
-                    ),
-                    (jogo_id, int(gols_a), int(gols_b)),
-                )
-                resultados_inseridos += 1
-            except (ValueError, TypeError):
-                pass
+            # Atualiza resultado se o jogo foi disputado
+            finished = str(jogo.get("finished", "FALSE")).upper() == "TRUE"
+            gols_a = jogo.get("home_score", None)
+            gols_b = jogo.get("away_score", None)
+
+            if finished and gols_a is not None and gols_b is not None:
+                try:
+                    cursor.execute(
+                        q(
+                            """INSERT INTO resultados_oficiais (jogo_id, gols_a, gols_b)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(jogo_id) DO UPDATE SET gols_a=excluded.gols_a, gols_b=excluded.gols_b"""
+                        ),
+                        (jogo_id, int(gols_a), int(gols_b)),
+                    )
+                    resultados_inseridos += 1
+                except (ValueError, TypeError):
+                    pass
+    else:
+        cursor.execute("SELECT COUNT(*) FROM jogos")
+        total_jogos = cursor.fetchone()[0]
+        if total_jogos == 0:
+            conn.close()
+            detalhe = "Nenhum jogo retornado pela API."
+            if erro_worldcup:
+                detalhe = f"Erro ao conectar na API após retries: {str(erro_worldcup)}"
+            raise HTTPException(status_code=503, detail=detalhe)
 
     # Atualiza times do mata-mata via ESPN (sobrescreve placeholders)
     espn_atualizados = 0
@@ -1082,10 +1151,14 @@ def sincronizar_completo():
     conn.commit()
     conn.close()
 
+    status_sync = "sucesso" if jogos_api else "parcial"
+    origem = "worldcup26.ir + ESPN" if jogos_api else "ESPN"
+
     return {
-        "status": "sucesso",
+        "status": status_sync,
+        "fonte": origem,
         "jogos_inseridos": inseridos,
         "resultados_inseridos": resultados_inseridos,
         "times_espn_atualizados": espn_atualizados,
-        "mensagem": f"Sincronização completa! {inseridos} jogos, {resultados_inseridos} resultados, {espn_atualizados} times atualizados via ESPN.",
+        "mensagem": f"Sincronização {status_sync}! {inseridos} jogos, {resultados_inseridos} resultados, {espn_atualizados} times atualizados via ESPN.",
     }
