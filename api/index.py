@@ -1010,6 +1010,20 @@ def atualizar_times_matamata_espn(cursor) -> int:
 
     atualizados = 0
 
+    # Pré-marca como "usado" eventos ESPN que já correspondem a jogos com
+    # times reais no banco.  Isso impede que um evento (ex: Norway vs England)
+    # seja reutilizado para preencher outro jogo cujo adversário ainda é placeholder.
+    for _jid, time_a, time_b, _fase, _dh in jogos_db:
+        if _is_placeholder(time_a) or _is_placeholder(time_b):
+            continue  # será resolvido no loop seguinte
+        for entry in eventos_espn:
+            if entry["usado"]:
+                continue
+            if (entry["home_db"] == time_a and entry["away_db"] == time_b) or \
+               (entry["home_db"] == time_b and entry["away_db"] == time_a):
+                entry["usado"] = True
+                break
+
     for jogo_id, time_a, time_b, _fase, data_hora in jogos_db:
         # Só atualiza se pelo menos um time é placeholder.
         if not _is_placeholder(time_a) and not _is_placeholder(time_b):

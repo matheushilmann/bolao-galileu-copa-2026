@@ -149,8 +149,8 @@ export default function App() {
     const horaJogo = new Date(dataHoraStr).getTime();
     const agora = new Date().getTime();
     if (agora < horaJogo) return 'nao_iniciado';
-    // 110min = 90min regulamentares + 20min de margem para acréscimos/intervalo
-    if (agora >= horaJogo && agora < horaJogo + (110 * 60 * 1000)) return 'em_andamento';
+    // 180min = 90min regulamentares + intervalo + 30min prorrogação + pênaltis + margem
+    if (agora >= horaJogo && agora < horaJogo + (180 * 60 * 1000)) return 'em_andamento';
     return 'encerrado';
   };
 
@@ -455,13 +455,15 @@ export default function App() {
       if (!gruposEncerrados) return true;
     }
 
-    // Verifica se TODAS as fases anteriores já encerraram seus jogos
+    // Verifica se TODAS as fases anteriores já encerraram seus jogos E possuem resultado oficial
     for (let i = 0; i < indiceFase; i++) {
       const faseAnterior = fasesEliminatorias[i];
       const jogosFaseAnterior = jogos.filter(j => j.fase === faseAnterior);
       if (jogosFaseAnterior.length === 0) return true;
-      const todosEncerrados = jogosFaseAnterior.every(j => getStatusJogo(j.data_hora) === 'encerrado');
-      if (!todosEncerrados) return true;
+      const todosEncerradosComResultado = jogosFaseAnterior.every(j =>
+        getStatusJogo(j.data_hora) === 'encerrado' && resultadosOficiais[j.jogo_id]?.gols_a !== undefined
+      );
+      if (!todosEncerradosComResultado) return true;
     }
 
     // Verifica se a fase atual tem jogos e se TODOS os times estão definidos
