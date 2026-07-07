@@ -813,6 +813,47 @@ def verificar_status_bloqueio():
     }
 
 
+@app.get("/api/fix-quartas")
+def fix_quartas():
+    """Correção pontual: reseta jogo j_100 que foi incorretamente preenchido
+    com Noruega x Inglaterra pelo antigo algoritmo de matching ESPN.
+    O time_a correto é Argentina e time_b deve aguardar o vencedor de
+    Colômbia x Suíça (oitavas, jogo 96)."""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Verifica o estado atual de j_100
+    cursor.execute(q("SELECT time_a, time_b FROM jogos WHERE jogo_id = ?"), ("j_100",))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"status": "nenhum_jogo", "mensagem": "Jogo j_100 não encontrado."}
+
+    time_a_atual, time_b_atual = row[0], row[1]
+
+    # Corrige: time_a deve ser Argentina, time_b deve ser placeholder
+    # (será preenchido quando o vencedor de Colômbia x Suíça for definido)
+    cursor.execute(
+        q("UPDATE jogos SET time_a = ?, time_b = ? WHERE jogo_id = ?"),
+        ("Argentina", "Vencedor Jogo 96", "j_100"),
+    )
+    conn.commit()
+
+    # Tenta atualizar via ESPN caso o vencedor já esteja definido
+    try:
+        atualizar_times_matamata_espn(cursor)
+        conn.commit()
+    except Exception:
+        pass
+
+    conn.close()
+    return {
+        "status": "corrigido",
+        "antes": {"time_a": time_a_atual, "time_b": time_b_atual},
+        "depois": {"time_a": "Argentina", "time_b": "Vencedor Jogo 96 (ou atualizado via ESPN)"},
+    }
+
+
 @app.get("/api/ranking")
 def buscar_ranking():
     conn = get_db()
