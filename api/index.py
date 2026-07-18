@@ -439,7 +439,9 @@ def mapear_fase(jogo: dict) -> str:
         return "Quartas"
     if tipo == "sf":
         return "Semi"
-    if tipo in ("final", "third"):
+    if tipo == "third":
+        return "3º Lugar"
+    if tipo == "final":
         return "Final"
     return tipo.upper()
 
@@ -896,6 +898,7 @@ def buscar_ranking():
         FROM jogos j
         JOIN resultados_oficiais r ON j.jogo_id = r.jogo_id
         WHERE j.fase = ?
+        ORDER BY j.data_hora DESC
         LIMIT 1"""
         ),
         ("Final",),

@@ -93,6 +93,7 @@ const FASES_MAP: Record<string, string> = {
   'Oitavas': 'Oitavas',
   'Quartas': 'Quartas',
   'Semi': 'Semi',
+  '3º Lugar': '3º Lugar',
   'Final': 'Final'
 };
 
@@ -212,7 +213,7 @@ export default function App() {
             }
             // Se todas as rodadas de grupo terminaram, navega para a próxima fase de mata-mata disponível
             if (gruposEncerrados) {
-              for (const fase of ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final']) {
+              for (const fase of ['16-avos', 'Oitavas', 'Quartas', 'Semi', '3º Lugar', 'Final']) {
                 const jogosDaFase = resJogos.filter((j: Jogo) => j.fase === fase);
                 const todosTimesDefinidos = jogosDaFase.length > 0 && jogosDaFase.every((j: Jogo) => isTimeDefinido(j.time_a) && isTimeDefinido(j.time_b));
                 if (todosTimesDefinidos) {
@@ -444,7 +445,7 @@ export default function App() {
     if (['Rodada 1', 'Rodada 2', 'Rodada 3'].includes(faseNome)) return false;
 
     // Ordem das fases eliminatórias para verificar dependências
-    const fasesEliminatorias = ['16-avos', 'Oitavas', 'Quartas', 'Semi', 'Final'];
+    const fasesEliminatorias = ['16-avos', 'Oitavas', 'Quartas', 'Semi', '3º Lugar', 'Final'];
     const indiceFase = fasesEliminatorias.indexOf(faseNome);
     if (indiceFase === -1) return true;
 
