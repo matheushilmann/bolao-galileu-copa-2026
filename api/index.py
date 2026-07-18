@@ -405,8 +405,12 @@ def is_rodada_bloqueada(fase: str, cursor) -> bool:
     if fase in ("Rodada 1", "Rodada 2", "Rodada 3"):
         return is_fase_grupos_bloqueada(cursor)
 
-    # Mata-mata: bloqueia quando o primeiro jogo DA FASE específica começa
-    cursor.execute(q("SELECT MIN(data_hora) FROM jogos WHERE fase = ?"), (fase,))
+    # 3º Lugar e Final bloqueiam juntos (quando o primeiro jogo de qualquer um começa)
+    if fase in ("3º Lugar", "Final"):
+        cursor.execute("SELECT MIN(data_hora) FROM jogos WHERE fase IN ('3º Lugar', 'Final')")
+    else:
+        # Demais fases de mata-mata: bloqueia quando o primeiro jogo DA FASE específica começa
+        cursor.execute(q("SELECT MIN(data_hora) FROM jogos WHERE fase = ?"), (fase,))
     row = cursor.fetchone()
     primeiro_jogo_str = row[0] if row else None
     if not primeiro_jogo_str:

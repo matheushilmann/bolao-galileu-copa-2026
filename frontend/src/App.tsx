@@ -457,8 +457,13 @@ export default function App() {
     }
 
     // Verifica se TODAS as fases anteriores já encerraram seus jogos E possuem resultado oficial
+    // NOTA: "3º Lugar" e "Final" não dependem um do outro — ambos dependem apenas da Semi
     for (let i = 0; i < indiceFase; i++) {
       const faseAnterior = fasesEliminatorias[i];
+      // Pula "3º Lugar" ao verificar dependências da "Final" (são fases paralelas)
+      if (faseNome === 'Final' && faseAnterior === '3º Lugar') continue;
+      // Pula "Final" ao verificar dependências de "3º Lugar" (mesma lógica)
+      if (faseNome === '3º Lugar' && faseAnterior === 'Final') continue;
       const jogosFaseAnterior = jogos.filter(j => j.fase === faseAnterior);
       if (jogosFaseAnterior.length === 0) return true;
       const todosEncerradosComResultado = jogosFaseAnterior.every(j =>
