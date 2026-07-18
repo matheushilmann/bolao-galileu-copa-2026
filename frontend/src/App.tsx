@@ -168,9 +168,11 @@ export default function App() {
   // Verifica se uma fase eliminatória está bloqueada para palpites.
   // REGRA: bloqueia TODOS os jogos da fase quando o 1º jogo daquela fase começa.
   const isFaseEliminatoriaBloqueada = (fase: string): boolean => {
-    const jogosDaFase = jogos.filter(j => j.fase === fase);
-    if (jogosDaFase.length === 0) return false;
-    const primeiraData = jogosDaFase.reduce((min, j) => {
+    // "3º Lugar" e "Final" bloqueiam juntos (quando o 1º jogo de qualquer uma começa)
+    const fasesParaVerificar = ['3º Lugar', 'Final'].includes(fase) ? ['3º Lugar', 'Final'] : [fase];
+    const jogosDasFases = jogos.filter(j => fasesParaVerificar.includes(j.fase));
+    if (jogosDasFases.length === 0) return false;
+    const primeiraData = jogosDasFases.reduce((min, j) => {
       const dt = new Date(j.data_hora).getTime();
       return dt < min ? dt : min;
     }, Infinity);
